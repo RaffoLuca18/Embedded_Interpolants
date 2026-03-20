@@ -98,10 +98,10 @@ class LiftedSI:
         Integrate  x_dot = b_t(x)  from t=0 to t=1  (Euler, K_steps steps).
 
         Velocity computation:
-          1. kx = k(x, Y)                         kernel evaluations  (n, N)
+          1. kx = k(x, Y)      kernel evaluations  (n, N)
           2. vt = v_t(x) in function-values        (N, n)   
-          3. beta  = K^{-1} vt                           (N, n)   
-          4. b  = -sum_i beta_i k(x, y_i)(x - y_i)           (n, d)   
+          3. beta  = K^{-1} vt                     (N, n)   
+          4. b  = -sum_i beta_i k(x, y_i)(x - y_i) (n, d)   
 
         Parameters
         ----------
