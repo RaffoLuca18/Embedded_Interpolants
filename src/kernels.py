@@ -1,12 +1,12 @@
 """
-Kernel utilities.
+kernel utilities
 """
 
 import numpy as np
 
 
 class GaussianKernel:
-    """Gaussian (RBF) kernel k(x,y) = exp(-||x-y||^2 / 2 sigma^2)."""
+    """ gaussian (rbf) kernel k(x,y) = exp(-||x-y||^2 / 2 sigma^2) """
 
     def __init__(self, sigma: float):
         self.sigma = sigma
