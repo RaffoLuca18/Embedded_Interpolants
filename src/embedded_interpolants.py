@@ -1,29 +1,28 @@
 """
-lifted_si.py
+embedded_interpolants.py
 ============
-Lifted Stochastic Interpolant — function-values representation
 
 Two key changes from the eigenbasis version:
 
-1. REPRESENTATION
-   Elements of V_N are identified with their function-value vectors
+1. representation
+   elements of V_N are identified with their function-value vectors
        f <-> f_value = (f(y_1),...,f(y_N)) in R^N,  <f, g> = f_value^T K^{-1} g_value
 
-2. PROJECTION ONTO R^d
-   For the Gaussian kernel, the pullback metric is  G(x) = (1/sigma^2) Id,
+2. projection onto R^d
+   for the gaussian kernel, the pullback metric is  G(x) = (1/sigma^2) Id,
    so the least-squares projection reduces to the
    closed-form formula:
 
        beta_t(x) = K^{-1} v_t(x)                       
-       b_t(x) = -sum_i beta_i(x) · (x - y_i) · k(x, y_i)  
+       b_t(x) = -sum_i beta_i(x) (x - y_i) k(x, y_i)  
 
 
-LIFTING RATIO
+lifting ratio
    eta_t(x) = ||h^||_t||^2_{H_k} / ||h_t||^2_{H_k}
            = (1/sigma^2)||b_t||^2 / (v_t^T K^{-1} v_t)
 
-   When rescale=True, b_t is rescaled by 1/sqrt(eta_t} so that the projected
-   velocity has the same RKHS norm as the original v_t.
+   when rescale = True, b_t is rescaled by 1/sqrt(eta_t} so that the projected
+   velocity has the same RKHS norm as the original v_t
 """
 
 import numpy as np
@@ -45,11 +44,11 @@ class LiftedSI:
         N_src_max: int = 200,
     ):
         """
-        Parameters
+        parameters
         ----------
         sigma_k      : RBF kernel bandwidth
-        gamma        : Tikhonov regularisation for covariance operators
-        K_steps      : number of Euler time steps per iteration
+        gamma        : tikhonov regularisation for covariance operators
+        K_steps      : number of euler time steps per iteration
         rescale      : correct velocity norm via lifting ratio eta_t
         max_scale    : upper clip for the rescaling factor 1/sqrt(eta_t)
         max_velocity : elementwise clip for b_t  (stability)
@@ -66,51 +65,51 @@ class LiftedSI:
         self._velocity_fields = []   # list of (FunctionValues, GaussianOT)
 
     # ──────────────────────────────────────────────────────────────────────
-    # Internal: build operators
+    # internal: build operators
     # ──────────────────────────────────────────────────────────────────────
 
     def _build(self, X_src: np.ndarray, X_tgt: np.ndarray):
         """
-        Build FunctionValues and GaussianOT from source/target samples.
+        build FunctionValues and GaussianOT from source/target samples
 
-        The pooled landmark set is Y = [X_src; X_tgt].
-        All NxN operators are computed in the function-values basis of V_N.
+        the pooled landmark set is Y = [X_src; X_tgt]
+        all NxN operators are computed in the function-values basis of V_N
         """
         kernel = GaussianKernel(self.sigma_k)
         Y_all  = np.vstack([X_src, X_tgt])
 
-        # Function-values representation on V_N  (K, K^{1/2}, K^{-1/2}, K^{-1})
+        # function-values representation on V_N  (K, K^{1/2}, K^{-1/2}, K^{-1})
         fv = FunctionValues(Y_all, kernel)
 
-        # Transport operators A_hat, B_hat and mean vectors k_0, k_1
+        # transport operators A_hat, B_hat and mean vectors k_0, k_1
         ot = GaussianOT(fv, X_src, X_tgt, gamma=self.gamma)
 
         return fv, ot
 
     # ──────────────────────────────────────────────────────────────────────
-    # Internal: ODE integration for one velocity field
+    # internal: ODE integration for one velocity field
     # ──────────────────────────────────────────────────────────────────────
 
     def _integrate(self, x_particles: np.ndarray,
                    fv: FunctionValues, ot: GaussianOT,
                    store_traj: bool = False) -> dict:
         """
-        Integrate  x_dot = b_t(x)  from t=0 to t=1  (Euler, K_steps steps).
+        integrate  x_dot = b_t(x)  from t=0 to t=1  (euler, K_steps steps)
 
-        Velocity computation:
+        velocity computation:
           1. kx = k(x, Y)      kernel evaluations  (n, N)
           2. vt = v_t(x) in function-values        (N, n)   
           3. beta  = K^{-1} vt                     (N, n)   
           4. b  = -sum_i beta_i k(x, y_i)(x - y_i) (n, d)   
 
-        Parameters
+        parameters
         ----------
         x_particles : (n, d)
         fv          : FunctionValues  (holds K, Ki, Y, kernel)
         ot          : GaussianOT      (holds A_hat, B_hat, k_0, k_1, K^{-1})
         store_traj  : if True, return full trajectory array
 
-        Returns
+        returns
         -------
         dict with keys 'particles', 'lift_ratios', optionally 'trajectories'
         """
@@ -128,18 +127,18 @@ class LiftedSI:
         for step in range(self.K_steps):
             t = step * dt
 
-            # ── Step 1-2: kernel evaluations + function-values velocity ──
+            # ── step 1-2: kernel evaluations + function-values velocity ──
             kx = fv.transform(x)                        # (n, N)
             vt = ot.velocity_fv(kx.T, t)               # (N, n)
 
-            # ── Step 3: expansion coefficients  beta = K^{-1} v_t ────────────
+            # ── step 3: expansion coefficients  beta = K^{-1} v_t ────────────
             beta = (ot.Ki @ vt).T                       # (n, N)
 
-            # ── Step 4 ────────────────────────────────────
+            # ── step 4 ────────────────────────────────────
             diff = x[:, None, :] - fv.Y[None, :, :]    # (n, N, d)
             b    = -np.einsum('ni,ni,nid->nd', beta, kx, diff)  # (n, d)
 
-            # ── Lifting ratio & rescaling ───────────────────
+            # ── lifting ratio + rescaling ───────────────────
             if self.rescale:
                 proj_norm2 = np.sum(b ** 2, axis=1) / sig2          # (n,)
 
@@ -154,7 +153,7 @@ class LiftedSI:
 
                 lift_ratios.append(float(np.mean(eta)))
 
-            # ── Clip, and Euler step ────────────────────────────────────────
+            # ── clip, and euler step ────────────────────────────────────────
             b = np.clip(b, -self.max_velocity, self.max_velocity)
             x = x + dt * b
 
@@ -167,27 +166,27 @@ class LiftedSI:
         return result
 
     # ──────────────────────────────────────────────────────────────────────
-    # Public: fit / transport
+    # public: fit / transport
     # ──────────────────────────────────────────────────────────────────────
 
     def fit(self, X_src: np.ndarray, X_tgt: np.ndarray,
             n_iterations: int = 5, verbose: bool = True):
         """
-        Learn the chain of n_iterations velocity fields.
+        learn the chain of n_iterations velocity fields
 
-        At each iteration k:
-          1. Build FunctionValues + GaussianOT from (current particles, target)
-          2. Integrate particles through the velocity field
-          3. Store (fv, ot) for future transport() calls
+        at each iteration k:
+          1. build FunctionValues + GaussianOT from (current particles, target)
+          2. integrate particles through the velocity field
+          3. store (fv, ot) for future transport() calls
 
-        Parameters
+        parameters
         ----------
         X_src        : (n, d)  initial source particles
         X_tgt        : (m, d)  target samples  (held fixed)
         n_iterations : number of iterative transport steps
         verbose      : print per-iteration diagnostics
 
-        Returns
+        returns
         -------
         self
         """
@@ -197,7 +196,7 @@ class LiftedSI:
         all_ratios = []
 
         for it in range(1, n_iterations + 1):
-            # Optionally subsample source particles for efficiency
+            # optionally subsample source particles for efficiency
             Ns      = min(len(x), self.N_src_max)
             src_idx = np.random.choice(len(x), Ns, replace=False)
 
@@ -223,15 +222,15 @@ class LiftedSI:
 
     def transport(self, x_new: np.ndarray, verbose: bool = False) -> dict:
         """
-        Transport NEW particles through the stored velocity chain.
+        transport new particles through the stored velocity chain
 
-        x_new has never been seen during fit() — this is the generative step.
+        x_new has never been seen during fit() — this is the generative step
 
-        Parameters
+        parameters
         ----------
         x_new   : (n, d)  fresh samples from rho_0
 
-        Returns
+        returns
         -------
         dict with 'particles', 'snapshots', 'lift_ratios'
         """
