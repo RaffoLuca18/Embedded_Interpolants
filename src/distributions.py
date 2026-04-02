@@ -1,5 +1,5 @@
 """
-Target distributions for experiments.
+target distributions for experiments
 """
 
 import numpy as np
@@ -7,7 +7,7 @@ import numpy as np
 
 def gaussian(n: int, d: int, mean: np.ndarray = None,
              cov: np.ndarray = None) -> np.ndarray:
-    """Sample from a Gaussian in R^d."""
+    """ sample from a gaussian in R^d """
     if mean is None:
         mean = np.zeros(d)
     if cov is None:
@@ -19,7 +19,7 @@ def gaussian_mixture(n: int, centers: np.ndarray,
                      sigma: float = 0.5,
                      weights: np.ndarray = None) -> np.ndarray:
     K, d = centers.shape
-    """Sample from a Gaussian mixture in R^d."""
+    """ sample from a gaussian mixture in R^d """
     # uniform weights if not specified
     if weights is None:
         weights = np.ones(K) / K
@@ -43,13 +43,13 @@ def gaussian_mixture(n: int, centers: np.ndarray,
 # ── Preset configurations ───────────────────────────────────────────
 
 def two_modes_1d(n: int, mu: float = 2.5, sigma: float = 0.5) -> np.ndarray:
-    """Mixture of 2 Gaussians in R^1, symmetric."""
+    """ mixture of 2 gaussians in R^1, symmetric """
     centers = np.array([[-mu], [mu]])
     return gaussian_mixture(n, centers, sigma)
 
 
 def three_modes_2d(n: int, r: float = 2.5, sigma: float = 0.35) -> np.ndarray:
-    """Mixture of 3 Gaussians in R^2, equilateral triangle."""
+    """ mixture of 3 gaussians in R^2, equilateral triangle """
     angles = np.array([np.pi / 2, np.pi / 2 + 2 * np.pi / 3,
                         np.pi / 2 + 4 * np.pi / 3])
     centers = r * np.column_stack([np.cos(angles), np.sin(angles)])
@@ -57,7 +57,7 @@ def three_modes_2d(n: int, r: float = 2.5, sigma: float = 0.35) -> np.ndarray:
 
 
 def four_modes_3d(n: int, r: float = 2.5, sigma: float = 0.35) -> np.ndarray:
-    """Mixture of 4 Gaussians in R^3, regular tetrahedron."""
+    """ mixture of 4 gaussians in R^3, regular tetrahedron """
     centers = np.array([
         [0, 0, r],
         [r * np.sqrt(8 / 9), 0, -r / 3],
@@ -69,7 +69,7 @@ def four_modes_3d(n: int, r: float = 2.5, sigma: float = 0.35) -> np.ndarray:
 
 def ring_2d(n: int, K: int = 8, r: float = 3.0,
             sigma: float = 0.3) -> np.ndarray:
-    """K Gaussians arranged in a ring in R^2."""
+    """ K gaussians arranged in a ring in R^2 """
     angles = np.linspace(0, 2 * np.pi, K, endpoint=False)
     centers = r * np.column_stack([np.cos(angles), np.sin(angles)])
     return gaussian_mixture(n, centers, sigma)
