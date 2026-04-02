@@ -1,16 +1,16 @@
 """
-W_2-OT between Gaussians in the RKHS, function-values representation.
+W_2-OT between gaussians in the rkhs, function-values representation
 
-Given empirical distributions rho_0, rho_1 supported on the pooled points Y,
+given empirical distributions rho_0, rho_1 supported on the pooled points Y,
 computes in the function-values basis:
 
-    A_hat  = K^{1/2} · Sigma_0^{-1/2} (Sigma_0^{1/2} Sigma_1 Sigma_0^{1/2})^{1/2} Sigma_0^{-1/2} · K^{-1/2}
+    A_hat  = K^{1/2} Sigma_0^{-1/2} (Sigma_0^{1/2} Sigma_1 Sigma_0^{1/2})^{1/2} Sigma_0^{-1/2} K^{-1/2}
 
     B_hat  = A_hat - I_N
 
-where  Sigma_k = K^{-1/2} Sigma_k K^{-1/2} + gamma Id  is the whitened empirical covariance.
+where  Sigma_k = K^{-1/2} Sigma_k K^{-1/2} + gamma Id  is the whitened empirical covariance
 
-The velocity in function-values space:
+the velocity in function-values space:
 
     v_t(x) = (k_1 - k_0) + B_hat A_hat_t^{-1} (k(x) - k_t)
 
@@ -18,7 +18,7 @@ and the expansion coefficients:
 
     beta_t(x) = K^{-1} v_t(x)
 
-are used by LiftedSI._integrate() to compute b_t.
+are used by LiftedSI._integrate() to compute b_t
 """
 
 import numpy as np
@@ -27,9 +27,9 @@ from .features import FunctionValues, _spd_ops
 
 class GaussianOT:
     """
-    Precomputes NxN transport operators in the function-values representation.
+    precomputes NxN transport operators in the function-values representation
 
-    Parameters
+    parameters
     ----------
     fv : FunctionValues
         Built on the *pooled* data Y = [Y_src; Y_tgt].
@@ -37,7 +37,7 @@ class GaussianOT:
     Y_tgt : (N_1, d)  target samples (rows N_0...N of fv.Y)
     gamma : Tikhonov regularisation
 
-    Attributes
+    attributes
     ----------
     kb0, kb1 : (N,)   mean function-value vectors
     Ahat     : (N, N) transport operator A_hat
@@ -54,15 +54,15 @@ class GaussianOT:
         N  = fv.N
         K  = fv.K
 
-        # ── Mean function-values ─────────────────────────────────────────
+        # ── mean function-values ─────────────────────────────────────────
         self.kb0 = K[:, :N0].mean(axis=1)   # (N,)
         self.kb1 = K[:, N0:].mean(axis=1)   # (N,)
 
-        # ── Centred kernel matrices ──────────────────────────────────────
+        # ── centred kernel matrices ──────────────────────────────────────
         Z0 = K[:, :N0] - self.kb0[:, None]  # (N, N0)
         Z1 = K[:, N0:] - self.kb1[:, None]  # (N, N1)
 
-        # ── Whitened covariances ─────────────────────────────────────────
+        # ── whitened covariances ─────────────────────────────────────────
         Kih = fv.Kih
         W0   = Kih @ Z0
         Sig0 = (W0 @ W0.T) / N0 + gamma * np.eye(N)
@@ -80,24 +80,24 @@ class GaussianOT:
         Atld          = S0ih @ Mh @ S0ih
         Atld          = (Atld + Atld.T) / 2
 
-        # ── Lift back to function-values basis ───────────────────────────
+        # ── lift back to function-values basis ───────────────────────────
         self.Ahat = fv.Kh @ Atld @ fv.Kih
         self.Bhat = self.Ahat - np.eye(N)
         self.Ki   = fv.Ki      # K^{-1}, needed for beta and norm computation
         self.N    = N
 
-    # ── Velocity in function-values space ───────────────────────
+    # ── velocity in function-values space ───────────────────────
 
     def velocity_fv(self, kx: np.ndarray, t: float) -> np.ndarray:
         """
-        Function-values of  v_t(x)
+        function-values of  v_t(x)
 
-        Parameters
+        parameters
         ----------
         kx : (N, n)   function-value vectors k(x_p) for a batch of n points
         t  : float    time in [0, 1]
 
-        Returns
+        returns
         -------
         vt : (N, n)   function-value vectors of v_t at each point
         """
