@@ -31,7 +31,7 @@ from .features import FunctionValues
 from .gaussian_ot import GaussianOT
 
 
-class LiftedSI:
+class EmbeddedInterpolants:
 
     def __init__(
         self,
