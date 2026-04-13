@@ -41,7 +41,7 @@ class EmbeddedInterpolants:
         rescale: bool = True,
         max_scale: float = 800.0, #8.0
         max_velocity: float = 1000.0, #10.0
-        N_src_max: int = 10000.0, #200
+        N_src_max: int = 200,
     ):
         """
         parameters
