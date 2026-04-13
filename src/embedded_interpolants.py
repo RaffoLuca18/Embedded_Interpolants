@@ -35,7 +35,7 @@ class EmbeddedInterpolants:
 
     def __init__(
         self,
-        sigma_k: float = 1.5,
+        sigma_k: float = None,
         gamma: float = 0.01,
         K_steps: int = 50,
         rescale: bool = True,
@@ -75,8 +75,13 @@ class EmbeddedInterpolants:
         the pooled landmark set is Y = [X_src; X_tgt]
         all NxN operators are computed in the function-values basis of V_N
         """
-        kernel = GaussianKernel(self.sigma_k)
-        Y_all  = np.vstack([X_src, X_tgt])
+        Y_all = np.vstack([X_src, X_tgt])
+
+        # bandwidth: median heuristic if sigma_k is None, fixed otherwise
+        if self.sigma_k is None:
+            kernel = GaussianKernel.from_median(Y_all)
+        else:
+            kernel = GaussianKernel(self.sigma_k)
 
         # function-values representation on V_N  (K, K^{1/2}, K^{-1/2}, K^{-1})
         fv = FunctionValues(Y_all, kernel)
