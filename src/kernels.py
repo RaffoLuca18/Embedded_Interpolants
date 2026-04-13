@@ -12,7 +12,7 @@ class GaussianKernel:
         self.sigma = sigma
 
     @staticmethod
-    def from_median(Y: np.ndarray, subsample: int = 500) -> "GaussianKernel":
+    def from_median(Y: np.ndarray, subsample: int = 5000) -> "GaussianKernel": #500
         """
         set sigma via the median heuristic:
             sigma = median(||y_i - y_j||)  over i < j
