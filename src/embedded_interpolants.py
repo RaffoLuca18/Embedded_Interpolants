@@ -36,7 +36,8 @@ class EmbeddedInterpolants:
     def __init__(
         self,
         sigma_k: float = None,
-        gamma: float = 0.001, #0.01
+        gamma: float = 0.01,
+        gamma_final: float = 0.0,
         K_steps: int = 50,
         rescale: bool = True,
         max_scale: float = 800.0, #8.0
@@ -56,6 +57,7 @@ class EmbeddedInterpolants:
         """
         self.sigma_k      = sigma_k
         self.gamma        = gamma
+        self.gamma_final  = gamma_final
         self.K_steps      = K_steps
         self.rescale      = rescale
         self.max_scale    = max_scale
@@ -68,7 +70,7 @@ class EmbeddedInterpolants:
     # internal: build operators
     # ──────────────────────────────────────────────────────────────────────
 
-    def _build(self, X_src: np.ndarray, X_tgt: np.ndarray):
+    def _build(self, X_src: np.ndarray, X_tgt: np.ndarray, gamma: float):
         """
         build FunctionValues and GaussianOT from source/target samples
 
@@ -87,8 +89,8 @@ class EmbeddedInterpolants:
         fv = FunctionValues(Y_all, kernel)
 
         # transport operators A_hat, B_hat and mean vectors k_0, k_1
-        ot = GaussianOT(fv, X_src, X_tgt, gamma=self.gamma)
-
+        ot = GaussianOT(fv, X_src, X_tgt, gamma=gamma)
+        
         return fv, ot
 
     # ──────────────────────────────────────────────────────────────────────
@@ -201,11 +203,13 @@ class EmbeddedInterpolants:
         all_ratios = []
 
         for it in range(1, n_iterations + 1):
-            # optionally subsample source particles for efficiency
+            alpha   = (it - 1) / max(n_iterations - 1, 1)
+            gamma_t = (1 - alpha) * self.gamma + alpha * self.gamma_final
+
             Ns      = min(len(x), self.N_src_max)
             src_idx = np.random.choice(len(x), Ns, replace=False)
 
-            fv, ot = self._build(x[src_idx], X_tgt)
+            fv, ot = self._build(x[src_idx], X_tgt, gamma=gamma_t)
             self._velocity_fields.append((fv, ot))
 
             res = self._integrate(x, fv, ot)
@@ -216,7 +220,7 @@ class EmbeddedInterpolants:
             all_ratios.append(mr)
 
             if verbose:
-                print(f"  Iter {it}: lift_ratio={mr:.3f},  N={fv.N}")
+                print(f"  Iter {it}: lift_ratio={mr:.3f},  gamma={gamma_t:.5f},  N={fv.N}")
 
         self._fitted     = True
         self._fit_result = {"particles": x,
