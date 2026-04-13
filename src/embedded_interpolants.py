@@ -36,12 +36,12 @@ class EmbeddedInterpolants:
     def __init__(
         self,
         sigma_k: float = None,
-        gamma: float = 0.01,
+        gamma: float = 0.001, #0.01
         K_steps: int = 50,
         rescale: bool = True,
-        max_scale: float = 8.0,
-        max_velocity: float = 10.0,
-        N_src_max: int = 200,
+        max_scale: float = 800.0, #8.0
+        max_velocity: float = 1000.0, #10.0
+        N_src_max: int = 10000.0, #200
     ):
         """
         parameters
