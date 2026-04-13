@@ -216,8 +216,7 @@ class EmbeddedInterpolants:
             all_ratios.append(mr)
 
             if verbose:
-                print(f"  Iter {it}: std={np.mean(np.std(x, 0)):.3f},  "
-                      f"lift_ratio={mr:.3f},  N={fv.N}")
+                print(f"  Iter {it}: lift_ratio={mr:.3f},  N={fv.N}")
 
         self._fitted     = True
         self._fit_result = {"particles": x,
@@ -255,7 +254,6 @@ class EmbeddedInterpolants:
             all_ratios.append(mr)
 
             if verbose:
-                print(f"  Iter {it}: std={np.mean(np.std(x, 0)):.3f},  "
-                      f"lift_ratio={mr:.3f}")
+                print(f"  Iter {it}: lift_ratio={mr:.3f}")
 
         return {"particles": x, "snapshots": snapshots, "lift_ratios": all_ratios}
