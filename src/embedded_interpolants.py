@@ -37,11 +37,11 @@ class EmbeddedInterpolants:
         self,
         sigma_k: float = None,
         gamma: float = 0.01,
-        gamma_final: float = 0.0,
+        gamma_final: float = 0.01,
         K_steps: int = 50,
         rescale: bool = True,
-        max_scale: float = 800.0, #8.0
-        max_velocity: float = 1000.0, #10.0
+        max_scale: float = 8.0, #8.0
+        max_velocity: float = 10.0, #10.0
         N_src_max: int = 10000, #200
     ):
         """
