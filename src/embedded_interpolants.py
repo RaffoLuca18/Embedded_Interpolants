@@ -50,37 +50,49 @@ class EmbeddedInterpolants:
         sigma_k: float = None,
         gamma: float = 0.01,
         gamma_final: float = 0.01,
+        q: float = 0.5,
+        q_final: float = 0.5,
         K_steps: int = 50,
         rescale: bool = True,
         max_scale: float = 8.0,
         max_velocity: float = 10.0,
         N_src_max: int = 10000,
         n_inducing: int = 500,
+        noise_level: float = 0.0,
+        noise_schedule: str = "linear",
     ):
         """
         parameters
         ----------
-        sigma_k      : RBF kernel bandwidth (None -> median heuristic)
-        gamma        : tikhonov regularisation for covariance operators
-        gamma_final  : gamma at the last iteration (linearly interpolated)
-        K_steps      : number of euler time steps per iteration
-        rescale      : correct velocity norm via lifting ratio eta_t
-        max_scale    : upper clip for the rescaling factor 1/sqrt(eta_t)
-        max_velocity : elementwise clip for b_t  (stability)
-        N_src_max    : max number of source particles used for statistics
-        n_inducing   : number of Nyström inducing points M.  If M is larger
-                       than the pooled dataset size, all pooled points are
-                       used (equivalent to the non-Nyström version).
+        sigma_k        : RBF kernel bandwidth (None -> quantile heuristic)
+        gamma          : tikhonov regularisation for covariance operators
+        gamma_final    : gamma at the last iteration (linearly interpolated)
+        q              : quantile for the bandwidth heuristic at iter 1
+        q_final        : quantile at the last iteration (linearly interpolated)
+        K_steps        : number of euler time steps per iteration
+        rescale        : correct velocity norm via lifting ratio eta_t
+        max_scale      : upper clip for the rescaling factor 1/sqrt(eta_t)
+        max_velocity   : elementwise clip for b_t  (stability)
+        N_src_max      : max number of source particles used for statistics
+        n_inducing     : number of Nyström inducing points M.  If M is larger
+                         than the pooled dataset size, all pooled points are
+                         used (equivalent to the non-Nyström version).
+        noise_level    : amplitude beta_0 of noise injection (0 = disabled)
+        noise_schedule : "constant" | "linear" | "sqrt"
         """
-        self.sigma_k      = sigma_k
-        self.gamma        = gamma
-        self.gamma_final  = gamma_final
-        self.K_steps      = K_steps
-        self.rescale      = rescale
-        self.max_scale    = max_scale
-        self.max_velocity = max_velocity
-        self.N_src_max    = N_src_max
-        self.n_inducing   = n_inducing
+        self.sigma_k        = sigma_k
+        self.gamma          = gamma
+        self.gamma_final    = gamma_final
+        self.q              = q
+        self.q_final        = q_final
+        self.K_steps        = K_steps
+        self.rescale        = rescale
+        self.max_scale      = max_scale
+        self.max_velocity   = max_velocity
+        self.N_src_max      = N_src_max
+        self.n_inducing     = n_inducing
+        self.noise_level    = noise_level
+        self.noise_schedule = noise_schedule
         self._fitted      = False
         self._velocity_fields = []   # list of (FunctionValues, GaussianOT)
 
@@ -88,7 +100,8 @@ class EmbeddedInterpolants:
     # internal: build operators
     # ──────────────────────────────────────────────────────────────────────
 
-    def _build(self, X_src: np.ndarray, X_tgt: np.ndarray, gamma: float):
+    def _build(self, X_src: np.ndarray, X_tgt: np.ndarray,
+               gamma: float, q: float):
         """
         build FunctionValues (on M Nyström inducing points) and GaussianOT
         (whose empirical statistics are computed from the full X_src, X_tgt).
@@ -96,9 +109,9 @@ class EmbeddedInterpolants:
         Y_all  = np.vstack([X_src, X_tgt])
         N_all  = len(Y_all)
 
-        # bandwidth: median heuristic on the pooled data, or fixed
+        # bandwidth: quantile heuristic on the pooled data, or fixed
         if self.sigma_k is None:
-            kernel = GaussianKernel.from_median(Y_all)
+            kernel = GaussianKernel.from_quantile(Y_all, q=q)
         else:
             kernel = GaussianKernel(self.sigma_k)
 
@@ -141,6 +154,9 @@ class EmbeddedInterpolants:
         sig2  = sigma ** 2
         Z     = fv.Y                                  # (M, d)
 
+        beta0     = float(self.noise_level)
+        use_noise = beta0 > 0.0
+
         lift_ratios = []
         if store_traj:
             traj = np.zeros((self.K_steps + 1, n, d))
@@ -149,8 +165,19 @@ class EmbeddedInterpolants:
         for step in range(self.K_steps):
             t = step * dt
 
+            if use_noise:
+                if   self.noise_schedule == "linear":
+                    beta_t = beta0 * (1.0 - t)
+                elif self.noise_schedule == "sqrt":
+                    beta_t = beta0 * np.sqrt(max(1.0 - t, 0.0))
+                else:
+                    beta_t = beta0
+                x_eval = x + beta_t * np.random.randn(n, d)
+            else:
+                x_eval = x
+
             # ── step 1-2: kernel evaluations + velocity + expansion coeffs ──
-            kx       = fv.transform(x)                       # (n, M)
+            kx       = fv.transform(x_eval)                  # (n, M)
             vt, Kiv  = ot.velocity_fv(kx.T, t)               # (M, n) each
 
             # ── step 3: beta (expansion coefficients) ───────────────────
@@ -159,7 +186,7 @@ class EmbeddedInterpolants:
             # ── step 4: projected velocity  b(x) = -sum_i beta_i k(x,z_i)(x-z_i)
             #    BLAS form: W = beta ⊙ kx, then  b = W @ Z - (W.sum) * x
             W = beta * kx                                    # (n, M)
-            b = W @ Z - W.sum(axis=1, keepdims=True) * x     # (n, d)
+            b = W @ Z - W.sum(axis=1, keepdims=True) * x_eval  # (n, d)
 
             # ── lifting ratio + rescaling ─────────────────────────────
             if self.rescale:
@@ -206,11 +233,12 @@ class EmbeddedInterpolants:
         for it in range(1, n_iterations + 1):
             alpha   = (it - 1) / max(n_iterations - 1, 1)
             gamma_t = (1 - alpha) * self.gamma + alpha * self.gamma_final
+            q_t     = (1 - alpha) * self.q     + alpha * self.q_final
 
             Ns      = min(len(x), self.N_src_max)
             src_idx = np.random.choice(len(x), Ns, replace=False)
 
-            fv, ot = self._build(x[src_idx], X_tgt, gamma=gamma_t)
+            fv, ot = self._build(x[src_idx], X_tgt, gamma=gamma_t, q=q_t)
             self._velocity_fields.append((fv, ot))
 
             res = self._integrate(x, fv, ot)
@@ -222,7 +250,8 @@ class EmbeddedInterpolants:
 
             if verbose:
                 print(f"  Iter {it}: lift_ratio={mr:.3f},  "
-                      f"gamma={gamma_t:.5f},  M={fv.N}")
+                      f"gamma={gamma_t:.5f},  q={q_t:.3f},  "
+                      f"sigma={fv.kernel.sigma:.3f},  M={fv.N}")
 
         self._fitted     = True
         self._fit_result = {"particles": x,
