@@ -216,15 +216,17 @@ class EmbeddedInterpolants:
             W    = beta * kx                                 # (n, M)
             b    = W @ Z - W.sum(axis=1, keepdims=True) * x_eval  # (n, d)
 
-            # ── lifting ratio + rescaling ────────────────────────────
+            # ── lifting ratio (diagnostic, always) ───────────────────
+            proj_norm2 = np.sum(b ** 2, axis=1) / sig2
+            v_norm2    = np.sum(vt * Kiv, axis=0)
+            eta = np.clip(proj_norm2 / (v_norm2 + 1e-10), 0.0, 1.0)
+            lift_ratios.append(float(np.mean(eta)))
+
+            # ── optional rescaling ───────────────────────────────────
             if self.rescale:
-                proj_norm2 = np.sum(b ** 2, axis=1) / sig2
-                v_norm2    = np.sum(vt * Kiv, axis=0)
-                eta   = np.clip(proj_norm2 / (v_norm2 + 1e-10), 0.0, 1.0)
                 scale = np.clip(1.0 / (np.sqrt(eta) + 1e-10),
                                 1.0, self.max_scale)
                 b = b * scale[:, None]
-                lift_ratios.append(float(np.mean(eta)))
 
             # ── clip and euler step ──────────────────────────────────
             b = np.clip(b, -self.max_velocity, self.max_velocity)
