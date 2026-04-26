@@ -23,7 +23,7 @@ Two key changes from the eigenbasis version:
 
 
 bandwidth selection
-   the kernel bandwidth sigma is chosen ONCE at the beginning of fit()
+   the kernel bandwidth sigma is chosen at the beginning of fit()
    from the pooled initial data X_src + X_tgt.  two strategies are
    supported via `bandwidth_method`:
 
@@ -33,13 +33,18 @@ bandwidth selection
                       log-spaced grid of factors in [0.1, 10].
 
    if `sigma_k` is given explicitly, it overrides both strategies.
-   no decay across iterations.
+
+   for the "quantile" method, q can be linearly decayed across iterations
+   from `q` (iter 1) to `q_final` (iter L), giving a per-iteration sigma
+   computed on the pooled initial data with the interpolated quantile.
+   default q_final = None means no decay.
 
 
 lifting ratio
    eta_t(x) = (1/sigma^2) ||b_t||^2 / <v_t, v_t>_{H_k}
-   when rescale = True, b_t is rescaled by 1/sqrt(eta_t) so that the
-   projected velocity has the same RKHS norm as the original v_t.
+   computed every step as a diagnostic. when rescale = True, b_t is
+   rescaled by 1/sqrt(eta_t) so that the projected velocity has the
+   same RKHS norm as the original v_t.
 
 
 Nyström
@@ -60,6 +65,7 @@ class EmbeddedInterpolants:
         sigma_k: float = None,
         bandwidth_method: str = "quantile",
         q: float = 0.5,
+        q_final: float = None,
         cv_factors: np.ndarray = None,
         bw_subsample: int = 2000,
         gamma: float = 0.01,
@@ -76,13 +82,17 @@ class EmbeddedInterpolants:
         """
         parameters
         ----------
-        sigma_k          : RBF kernel bandwidth.  if None, it is chosen ONCE
-                           at the beginning of fit() via `bandwidth_method`.
+        sigma_k          : RBF kernel bandwidth.  if None, it is chosen
+                           at fit() via `bandwidth_method`.
         bandwidth_method : "quantile" | "cross_median"   (used only if sigma_k is None)
                            - "quantile":   GaussianKernel.from_quantile(Y_init, q=q)
                            - "cross_median": GaussianKernel.from_cross_median(Y_init,
                                               factors=cv_factors, subsample=bw_subsample)
-        q                : quantile for the "quantile" heuristic (default 0.5, median)
+        q                : quantile for the "quantile" heuristic at iter 1
+                           (default 0.5, median).
+        q_final          : quantile at iter L; linearly interpolated from `q`.
+                           only effective when bandwidth_method == "quantile"
+                           and sigma_k is None. default None -> no decay (q_final = q).
         cv_factors       : factor grid for "cross_median" (default: np.logspace(-1,1,11))
         bw_subsample     : max points used to evaluate the bandwidth selection
         gamma            : tikhonov regularisation for covariance operators
@@ -99,6 +109,7 @@ class EmbeddedInterpolants:
         self.sigma_k          = sigma_k
         self.bandwidth_method = bandwidth_method
         self.q                = q
+        self.q_final          = q if q_final is None else q_final
         self.cv_factors       = cv_factors
         self.bw_subsample     = bw_subsample
         self.gamma            = gamma
@@ -114,21 +125,25 @@ class EmbeddedInterpolants:
 
         self._fitted          = False
         self._velocity_fields = []   # list of (FunctionValues, GaussianOT)
-        self._sigma           = None # frozen bandwidth after fit()
+        self._sigma           = None # current bandwidth (last set)
+        self._sigmas          = []   # per-iteration bandwidths
 
     # ──────────────────────────────────────────────────────────────────────
-    # internal: pick bandwidth once
+    # internal: pick bandwidth
     # ──────────────────────────────────────────────────────────────────────
 
-    def _select_bandwidth(self, Y_init: np.ndarray) -> float:
+    def _select_bandwidth(self, Y_init: np.ndarray, q: float = None) -> float:
         """
-        choose and freeze the kernel bandwidth from the pooled initial data.
+        choose the kernel bandwidth from the pooled initial data.
+        if `q` is given, it overrides self.q (used for per-iteration decay).
         """
         if self.sigma_k is not None:
             return float(self.sigma_k)
 
+        q_use = self.q if q is None else q
+
         if self.bandwidth_method == "quantile":
-            ker = GaussianKernel.from_quantile(Y_init, q=self.q,
+            ker = GaussianKernel.from_quantile(Y_init, q=q_use,
                                                subsample=self.bw_subsample)
         elif self.bandwidth_method == "cross_median":
             ker = GaussianKernel.from_cross_median(Y_init,
@@ -149,7 +164,7 @@ class EmbeddedInterpolants:
         """
         build FunctionValues (on M Nyström inducing points) and GaussianOT
         (whose empirical statistics are computed from the full X_src, X_tgt).
-        the kernel bandwidth self._sigma is fixed by fit().
+        the kernel bandwidth self._sigma is set by fit().
         """
         Y_all  = np.vstack([X_src, X_tgt])
         N_all  = len(Y_all)
@@ -249,18 +264,31 @@ class EmbeddedInterpolants:
         """
         learn the chain of n_iterations velocity fields.
 
-        bandwidth selection (from X_src + X_tgt) is done ONCE, here.
+        bandwidth selection (from X_src + X_tgt) is done at fit() time;
+        if q != q_final and method == "quantile", sigma is recomputed at
+        each iteration with the linearly interpolated quantile.
         """
-        # ── freeze bandwidth on initial pooled data ──────────────────────
-        Y_init       = np.vstack([X_src, X_tgt])
-        self._sigma  = self._select_bandwidth(Y_init)
+        # ── pooled initial data, used as reference for bandwidth ─────────
+        Y_init = np.vstack([X_src, X_tgt])
+
+        # decay quantile only if it makes sense
+        decay_q = (self.sigma_k is None
+                   and self.bandwidth_method == "quantile"
+                   and self.q_final != self.q)
+
+        # initial bandwidth (iter 1)
+        self._sigma  = self._select_bandwidth(Y_init, q=self.q)
+        self._sigmas = []
 
         if verbose:
-            if self.sigma_k is None:
+            if self.sigma_k is not None:
+                print(f"  Bandwidth (fixed): sigma={self._sigma:.4f}")
+            elif decay_q:
+                print(f"  Bandwidth (quantile, decaying q={self.q}->"
+                      f"{self.q_final}): sigma_init={self._sigma:.4f}")
+            else:
                 print(f"  Bandwidth ({self.bandwidth_method}): "
                       f"sigma={self._sigma:.4f}")
-            else:
-                print(f"  Bandwidth (fixed): sigma={self._sigma:.4f}")
 
         # ── iterate velocity fields ──────────────────────────────────────
         self._velocity_fields = []
@@ -271,6 +299,11 @@ class EmbeddedInterpolants:
         for it in range(1, n_iterations + 1):
             alpha   = (it - 1) / max(n_iterations - 1, 1)
             gamma_t = (1 - alpha) * self.gamma + alpha * self.gamma_final
+            q_t     = (1 - alpha) * self.q     + alpha * self.q_final
+
+            if decay_q:
+                self._sigma = self._select_bandwidth(Y_init, q=q_t)
+            self._sigmas.append(self._sigma)
 
             Ns      = min(len(x), self.N_src_max)
             src_idx = np.random.choice(len(x), Ns, replace=False)
@@ -287,12 +320,14 @@ class EmbeddedInterpolants:
 
             if verbose:
                 print(f"  Iter {it}: lift_ratio={mr:.3f},  "
-                      f"gamma={gamma_t:.5f},  sigma={self._sigma:.3f},  M={fv.N}")
+                      f"gamma={gamma_t:.5f},  q={q_t:.3f},  "
+                      f"sigma={self._sigma:.3f},  M={fv.N}")
 
         self._fitted     = True
         self._fit_result = {"particles": x,
                             "snapshots": snapshots,
-                            "lift_ratios": all_ratios}
+                            "lift_ratios": all_ratios,
+                            "sigmas": list(self._sigmas)}
         return self
 
     def transport(self, x_new: np.ndarray, verbose: bool = False) -> dict:
