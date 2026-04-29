@@ -2,24 +2,6 @@
 embedded_interpolants.py  (Nyström version)
 ============================================
 
-Two key changes from the eigenbasis version:
-
-1. representation
-   elements of V_M are identified with their function-value vectors at the
-   inducing points z_1, ..., z_M (M ≪ N_src + N_tgt in general):
-       f <-> f_value = (f(z_1),...,f(z_M)) in R^M,   <f, g> = f_value^T K^{-1} g_value
-
-2. projection onto R^d
-   for the gaussian kernel, the pullback metric is  G(x) = (1/sigma^2) Id,
-   so the least-squares projection reduces to the closed-form formula:
-
-       beta_t(x) = K^{-1} v_t(x)
-       b_t(x)    = -sum_i beta_i(x) (x - z_i) k(x, z_i)
-
-   computed in BLAS form, without the O(n M d) intermediate tensor:
-
-       W       = beta * kx                  (n, M)
-       b_t(x)  = W @ Z - W.sum(1) * x       (n, d)
 
 
 bandwidth selection
@@ -78,6 +60,8 @@ class EmbeddedInterpolants:
         n_inducing: int = 500,
         noise_level: float = 0.0,
         noise_schedule: str = "linear",
+        add_dimension: int = 0,
+        initial_noise: float = 0.0,
     ):
         """
         parameters
@@ -105,6 +89,25 @@ class EmbeddedInterpolants:
         n_inducing       : number of Nyström inducing points M
         noise_level      : amplitude beta_0 of noise injection (0 = disabled)
         noise_schedule   : "constant" | "linear" | "sqrt"
+        add_dimension    : non-negative integer.  if > 0, append this many
+                           extra coordinates to all samples before fitting,
+                           expanding the ambient space from R^d to R^(d+k).
+                           the tangent space of the embedded submanifold then
+                           grows from d to d+k dimensions, potentially raising
+                           the lifting ratio.  the chain operates entirely in
+                           the augmented space; particles are projected back
+                           to the original R^d only at the end (in fit_result
+                           snapshots and in transport() output).  default 0
+                           = disabled (no augmentation, behaviour unchanged).
+        initial_noise    : non-negative float.  std of gaussian noise added
+                           to the new coordinates of source samples (X_src in
+                           fit, x_new in transport); target samples (X_tgt)
+                           keep zero on the new coordinates.  this creates
+                           non-trivial transport in the new directions, so
+                           the augmented coordinates are actually exploited
+                           by the velocity field.  default 0 = new dims are
+                           identically zero on both sides (transport in those
+                           directions is trivial).
         """
         self.sigma_k          = sigma_k
         self.bandwidth_method = bandwidth_method
@@ -122,11 +125,44 @@ class EmbeddedInterpolants:
         self.n_inducing       = n_inducing
         self.noise_level      = noise_level
         self.noise_schedule   = noise_schedule
+        self.add_dimension    = int(add_dimension)
+        self.initial_noise    = float(initial_noise)
+
+        if self.add_dimension < 0:
+            raise ValueError("add_dimension must be a non-negative integer.")
+        if self.initial_noise < 0:
+            raise ValueError("initial_noise must be a non-negative float.")
 
         self._fitted          = False
         self._velocity_fields = []   # list of (FunctionValues, GaussianOT)
         self._sigma           = None # current bandwidth (last set)
         self._sigmas          = []   # per-iteration bandwidths
+        self._original_dim    = None # set at fit() time
+
+    # ──────────────────────────────────────────────────────────────────────
+    # internal: dimension augmentation
+    # ──────────────────────────────────────────────────────────────────────
+
+    def _augment(self, X: np.ndarray, source: bool) -> np.ndarray:
+        """
+        append `add_dimension` extra columns to X.
+        source samples receive gaussian noise N(0, initial_noise^2) on the
+        new coordinates; target samples receive zeros.
+        """
+        if self.add_dimension == 0:
+            return X
+        n = len(X)
+        if source and self.initial_noise > 0.0:
+            new_cols = self.initial_noise * np.random.randn(n, self.add_dimension)
+        else:
+            new_cols = np.zeros((n, self.add_dimension))
+        return np.hstack([X, new_cols])
+
+    def _deaugment(self, X: np.ndarray) -> np.ndarray:
+        """drop the extra columns to project back to original R^d."""
+        if self.add_dimension == 0 or self._original_dim is None:
+            return X
+        return X[:, : self._original_dim]
 
     # ──────────────────────────────────────────────────────────────────────
     # internal: pick bandwidth
@@ -268,6 +304,17 @@ class EmbeddedInterpolants:
         if q != q_final and method == "quantile", sigma is recomputed at
         each iteration with the linearly interpolated quantile.
         """
+        # ── remember original dim and (optionally) augment ──────────────
+        self._original_dim = X_src.shape[1]
+        if self.add_dimension > 0:
+            X_src = self._augment(X_src, source=True)
+            X_tgt = self._augment(X_tgt, source=False)
+            if verbose:
+                print(f"  Dim augmentation: {self._original_dim} -> "
+                      f"{self._original_dim + self.add_dimension} "
+                      f"(+{self.add_dimension} new dims, "
+                      f"src noise sd={self.initial_noise}, tgt = 0).")
+
         # ── pooled initial data, used as reference for bandwidth ─────────
         Y_init = np.vstack([X_src, X_tgt])
 
@@ -324,8 +371,14 @@ class EmbeddedInterpolants:
                       f"sigma={self._sigma:.3f},  M={fv.N}")
 
         self._fitted     = True
-        self._fit_result = {"particles": x,
-                            "snapshots": snapshots,
+        if self.add_dimension > 0:
+            x_out         = self._deaugment(x)
+            snapshots_out = [self._deaugment(s) for s in snapshots]
+        else:
+            x_out         = x
+            snapshots_out = snapshots
+        self._fit_result = {"particles": x_out,
+                            "snapshots": snapshots_out,
                             "lift_ratios": all_ratios,
                             "sigmas": list(self._sigmas)}
         return self
@@ -337,6 +390,17 @@ class EmbeddedInterpolants:
         """
         if not self._fitted:
             raise RuntimeError("Call fit() first.")
+
+        # new particles are drawn from P_0, so they get the same treatment
+        # as X_src in fit(): augment with gaussian noise on the new dims.
+        if self.add_dimension > 0:
+            if x_new.shape[1] != self._original_dim:
+                raise ValueError(
+                    f"x_new has {x_new.shape[1]} columns, expected "
+                    f"{self._original_dim} (the original R^d before "
+                    f"augmentation)."
+                )
+            x_new = self._augment(x_new, source=True)
 
         x          = x_new.copy()
         snapshots  = [x.copy()]
@@ -352,5 +416,9 @@ class EmbeddedInterpolants:
 
             if verbose:
                 print(f"  Iter {it}: lift_ratio={mr:.3f}")
+
+        if self.add_dimension > 0:
+            x         = self._deaugment(x)
+            snapshots = [self._deaugment(s) for s in snapshots]
 
         return {"particles": x, "snapshots": snapshots, "lift_ratios": all_ratios}
