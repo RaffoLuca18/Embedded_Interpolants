@@ -1,0 +1,19 @@
+MNIST unconditional, no PCA
+========================================
+n_samples       : 70000
+n_train / n_test: 63000 / 7000
+d (pixel space) : 784
+n_iterations    : 8
+K_steps         : 80
+n_inducing      : 900
+q -> q_final    : 0.5 -> 0.1
+gamma -> final  : 0.01 -> 1e-08
+
+Fit lift_ratios per iter : [0.48, 0.453, 0.369, 0.357, 0.311, 0.242, 0.19, 0.17]
+Sigmas per iter          : [33.581, 32.38, 30.69, 29.319, 28.166, 26.576, 25.187, 23.824]
+
+SW1 per snapshot     : [0.4245, 0.2106, 0.1385, 0.1153, 0.1065, 0.094, 0.0844, 0.0754, 0.072]
+Energy per snapshot  : [5.9907, 0.953, 0.315, 0.2043, 0.1503, 0.1039, 0.0648, 0.0408, 0.0441]
+
+Fit time      : 955.2s
+Transport time: 105.2s
