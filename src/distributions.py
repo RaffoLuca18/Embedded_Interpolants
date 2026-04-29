@@ -28,7 +28,7 @@ def gaussian_mixture(n: int, centers: np.ndarray,
 
     # assign each sample to a component
     labels = np.random.choice(K, size=n, p=weights)
-    
+
     # draw samples component by component
     samples = np.zeros((n, d))
     for k, center in enumerate(centers):
@@ -36,7 +36,7 @@ def gaussian_mixture(n: int, centers: np.ndarray,
         n_k = idx.sum()
         if n_k > 0:
             samples[idx] = center + sigma * np.random.randn(n_k, d)
-    
+
     return samples
 
 
@@ -73,3 +73,38 @@ def ring_2d(n: int, K: int = 8, r: float = 3.0,
     angles = np.linspace(0, 2 * np.pi, K, endpoint=False)
     centers = r * np.column_stack([np.cos(angles), np.sin(angles)])
     return gaussian_mixture(n, centers, sigma)
+
+
+def two_moons(n: int, sigma: float = 0.1, r: float = 1.0,
+              gap: float = 0.5) -> np.ndarray:
+    """
+    two interleaving half-circles in R^2 with isotropic gaussian noise,
+    centered at the origin.
+
+    upper moon : upper half-circle (theta in [0, pi]),  shifted by (-r/2, +gap/2)
+    lower moon : lower half-circle (theta in [pi, 2pi]), shifted by (+r/2, -gap/2)
+
+    parameters
+    ----------
+    n     : total number of samples
+    sigma : isotropic gaussian noise std
+    r     : half-circle radius
+    gap   : vertical separation between the two moons
+    """
+    n1 = n // 2
+    n2 = n - n1
+
+    # upper moon: theta in [0, pi], centered at (-r/2, +gap/2)
+    theta1 = np.random.uniform(0, np.pi, n1)
+    upper  = np.column_stack([-r / 2 + r * np.cos(theta1),
+                               gap / 2 + r * np.sin(theta1)])
+
+    # lower moon: theta in [pi, 2pi], centered at (+r/2, -gap/2)
+    theta2 = np.random.uniform(np.pi, 2 * np.pi, n2)
+    lower  = np.column_stack([ r / 2 + r * np.cos(theta2),
+                              -gap / 2 + r * np.sin(theta2)])
+
+    samples = np.vstack([upper, lower])
+    samples += sigma * np.random.randn(n, 2)
+    np.random.shuffle(samples)
+    return samples

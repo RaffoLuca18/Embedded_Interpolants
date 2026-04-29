@@ -5,16 +5,12 @@ One Embedded Interpolants model **per digit** (10 separate fits),
 directly on pixel space (d=784, no PCA).
 
 Same diagnostics as the unconditional version, but stratified by class.
-
-Produces a `diagnostics_per_digit/` folder with:
-    01_grid_real_train_fresh.png    one row per digit, 3 cols (real/train/fresh)
-    02_metrics_per_digit.png        SW1 + energy decay, one curve per digit + mean
-    03_evolution_<digit>.png        sub-step evolution, one file per selected digit
-    summary.txt                     final numbers per digit
+Includes verbose progress (heartbeat + phase timing).
 """
 
 import sys
 import time
+import threading
 from pathlib import Path
 
 import numpy as np
@@ -26,55 +22,86 @@ from src import EmbeddedInterpolants, sliced_wasserstein1, energy_distance
 
 
 # =============================================================================
-# CONFIG  -- tweak freely
+# CONFIG
 # =============================================================================
 SEED               = 42
 OUTPUT_DIR         = "diagnostics_per_digit"
 
-# data --------------------------------------------------------------------
-DIGITS             = list(range(10))   # which digits to process
-N_MAX_PER_CLASS    = None              # None = all available samples per class
+DIGITS             = list(range(10))
+N_MAX_PER_CLASS    = None
 TEST_FRACTION      = 0.10
 
-# model -------------------------------------------------------------------
-N_ITERATIONS       = 8                 # length of the velocity-field chain
-SIGMA_K            = None              # None -> auto via quantile heuristic
-Q                  = 0.5               # bandwidth quantile, iter 1
-Q_FINAL            = 0.05              # bandwidth quantile, iter L (smaller = sharper)
-GAMMA              = 0.01              # tikhonov reg, iter 1
-GAMMA_FINAL        = 1e-8              # tikhonov reg, iter L
-K_STEPS            = 100               # euler sub-steps per iteration
-N_INDUCING         = 1000              # Nystrom inducing points M
+N_ITERATIONS       = 8
+SIGMA_K            = None
+Q                  = 0.5
+Q_FINAL            = 0.05
+GAMMA              = 0.01
+GAMMA_FINAL        = 1e-8
+K_STEPS            = 100
+N_INDUCING         = 1000
 RESCALE            = True
 
-# sample sizes ------------------------------------------------------------
-N_SRC_FIT          = 2000              # source particles in fit()
-N_TRANSPORT        = 500               # fresh samples for transport()
+N_SRC_FIT          = 2000
+N_TRANSPORT        = 500
 
-# diagnostics -------------------------------------------------------------
-N_SAMPLES_SHOWN    = 10                # per row in the grid plot
-
-EVOLUTION_DIGITS   = [0, 3, 7]         # which digits to draw evolution for
+N_SAMPLES_SHOWN    = 10
+EVOLUTION_DIGITS   = [0, 3, 7]
 N_EVOLUTION_ROWS   = 6
 N_EVOLUTION_COLS   = 9
-
 ENERGY_NMAX        = 1000
 SW1_NPROJ          = 100
+
+HEARTBEAT_SEC      = 5
 # =============================================================================
 
 
 # -----------------------------------------------------------------------------
-# data loading (same as unconditional)
+# heartbeat + phase header
+# -----------------------------------------------------------------------------
+class Heartbeat:
+    def __init__(self, label, interval=HEARTBEAT_SEC):
+        self.label    = label
+        self.interval = interval
+        self.stop     = threading.Event()
+        self.t0       = None
+        self.thread   = None
+
+    def __enter__(self):
+        self.t0 = time.time()
+        print(f">>> START {self.label}", flush=True)
+        self.thread = threading.Thread(target=self._loop, daemon=True)
+        self.thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self.stop.set()
+        if self.thread is not None:
+            self.thread.join(timeout=1.0)
+        print(f"<<< END   {self.label}  ({time.time()-self.t0:.1f}s)", flush=True)
+
+    def _loop(self):
+        while not self.stop.wait(self.interval):
+            print(f"    [.. {self.label}: {time.time()-self.t0:.0f}s elapsed ..]",
+                  flush=True)
+
+
+def hr(label):
+    bar = "=" * 70
+    print(f"\n{bar}\n  {label}\n{bar}", flush=True)
+
+
+# -----------------------------------------------------------------------------
+# data
 # -----------------------------------------------------------------------------
 def load_mnist():
     try:
         m = fetch_openml("mnist_784", version=1, as_frame=False, parser="auto")
         X = m.data.astype(np.float32) / 255.0
         y = m.target.astype(np.int64)
-        print(f"  MNIST via openml: X={X.shape}")
+        print(f"  MNIST via openml: X={X.shape}", flush=True)
         return X, y
     except Exception as e:
-        print(f"  openml failed ({type(e).__name__}); github mirror...")
+        print(f"  openml failed ({type(e).__name__}); github mirror...", flush=True)
     import gzip, struct, subprocess, tempfile
     td = Path(tempfile.gettempdir()) / "mnist-data"
     if not td.exists():
@@ -95,7 +122,7 @@ def load_mnist():
                         _imgs(td / "t10k-images-idx3-ubyte.gz")]).astype(np.float32) / 255.0
     y = np.concatenate([_lbls(td / "train-labels-idx1-ubyte.gz"),
                         _lbls(td / "t10k-labels-idx1-ubyte.gz")]).astype(np.int64)
-    print(f"  MNIST via github mirror: X={X.shape}")
+    print(f"  MNIST via github mirror: X={X.shape}", flush=True)
     return X, y
 
 
@@ -103,17 +130,20 @@ def load_mnist():
 # helpers
 # -----------------------------------------------------------------------------
 def fine_grained_trajectory(model, x0):
-    """All euler sub-steps stitched together: shape (1 + L*K_steps, n, d)."""
     x = x0.copy()
     if model.add_dimension > 0:
         x = model._augment(x, source=True)
     snaps = [x.copy()]
-    for fv, ot in model._velocity_fields:
+    n_vf = len(model._velocity_fields)
+    for vf_i, (fv, ot) in enumerate(model._velocity_fields, 1):
+        t0 = time.time()
+        print(f"    evolution iter {vf_i}/{n_vf} ...", flush=True)
         res = model._integrate(x, fv, ot, store_traj=True)
         traj = res["trajectories"]
         for k in range(1, len(traj)):
             snaps.append(traj[k])
         x = res["particles"]
+        print(f"      done in {time.time()-t0:.1f}s", flush=True)
     snaps = np.stack(snaps)
     if model.add_dimension > 0:
         snaps = snaps[..., :model._original_dim]
@@ -129,14 +159,16 @@ def grid_strip(images, n):
 
 
 # -----------------------------------------------------------------------------
-# fit one digit
+# per-digit fit
 # -----------------------------------------------------------------------------
-def fit_one_digit(digit, X, y, d, rng):
+def fit_one_digit(digit, X, y, d, rng, idx, total):
+    hr(f"DIGIT {digit}  ({idx}/{total})")
     mask = y == digit
     X_d = X[mask]
     if N_MAX_PER_CLASS is not None and len(X_d) > N_MAX_PER_CLASS:
         keep = rng.choice(len(X_d), N_MAX_PER_CLASS, replace=False)
         X_d = X_d[keep]
+    print(f"  n_samples={len(X_d)}", flush=True)
 
     scale = np.maximum(np.std(X_d, axis=0, keepdims=True), 1e-3)
     Xn    = X_d / scale
@@ -154,18 +186,23 @@ def fit_one_digit(digit, X, y, d, rng):
         q           = Q, q_final = Q_FINAL,
         rescale     = RESCALE,
     )
-    print(f"\n=== Digit {digit} | n_samples={len(X_d)} ===")
-    t0 = time.time()
-    model.fit(np.random.randn(N_SRC_FIT, d), X_tr,
-              n_iterations=N_ITERATIONS, verbose=True)
-    t_fit = time.time() - t0
+    with Heartbeat(f"fit (digit {digit})") as hb:
+        model.fit(np.random.randn(N_SRC_FIT, d), X_tr,
+                  n_iterations=N_ITERATIONS, verbose=True)
+    t_fit = time.time() - hb.t0
 
-    res = model.transport(np.random.randn(N_TRANSPORT, d))
+    with Heartbeat(f"transport (digit {digit})"):
+        res = model.transport(np.random.randn(N_TRANSPORT, d))
 
+    print("  computing per-iteration metrics...", flush=True)
     sw1, en = [], []
-    for snap in res["snapshots"]:
-        sw1.append(sliced_wasserstein1(snap, X_te, n_proj=SW1_NPROJ))
-        en.append(energy_distance(snap, X_te, n_max=ENERGY_NMAX, seed=0))
+    for i, snap in enumerate(res["snapshots"]):
+        s = sliced_wasserstein1(snap, X_te, n_proj=SW1_NPROJ)
+        e = energy_distance(snap, X_te, n_max=ENERGY_NMAX, seed=0)
+        sw1.append(s); en.append(e)
+    print(f"    SW1 final = {sw1[-1]:.4f},  E final = {en[-1]:.4f},  "
+          f"eta_final = {model._fit_result['lift_ratios'][-1]:.3f}",
+          flush=True)
 
     return {
         "real":        X_d[perm[:N_SAMPLES_SHOWN]],
@@ -189,7 +226,8 @@ def fit_one_digit(digit, X, y, d, rng):
 def plot_grid(out, results):
     digits = sorted(results.keys())
     fig, axes = plt.subplots(len(digits), 3,
-                             figsize=(N_SAMPLES_SHOWN * 1.0 + 3, len(digits) * 1.4))
+                             figsize=(N_SAMPLES_SHOWN * 1.0 + 3,
+                                      len(digits) * 1.4))
     if len(digits) == 1:
         axes = axes[None, :]
     for i, digit in enumerate(digits):
@@ -229,7 +267,8 @@ def plot_metrics(out, results):
         ax.set_title(f"{name} vs iteration", fontweight="bold")
         ax.grid(alpha=0.3)
         ax.legend(ncol=2, fontsize=8, title="digit", loc="upper right")
-    fig.suptitle("Per-digit metric decay", fontweight="bold", fontsize=12, y=1.02)
+    fig.suptitle("Per-digit metric decay",
+                 fontweight="bold", fontsize=12, y=1.02)
     fig.tight_layout()
     fig.savefig(out / "02_metrics_per_digit.png",
                 bbox_inches="tight", dpi=140)
@@ -241,12 +280,12 @@ def plot_evolution(out, results, evol_digits, d):
         if digit not in results:
             continue
         r = results[digit]
+        print(f"  evolution for digit {digit}...", flush=True)
         X0 = np.random.randn(N_EVOLUTION_ROWS, d)
         snaps = fine_grained_trajectory(r["model"], X0)
         T = len(snaps)
         col_idx = np.linspace(0, T - 1, N_EVOLUTION_COLS).round().astype(int)
         K = K_STEPS
-
         fig, axes = plt.subplots(N_EVOLUTION_ROWS, N_EVOLUTION_COLS,
                                  figsize=(N_EVOLUTION_COLS * 1.3,
                                           N_EVOLUTION_ROWS * 1.3))
@@ -308,7 +347,7 @@ def write_summary(out, results):
     ]
     txt = "\n".join(lines)
     (out / "summary.txt").write_text(txt)
-    print("\n" + txt)
+    print(txt, flush=True)
 
 
 # -----------------------------------------------------------------------------
@@ -321,20 +360,39 @@ def main():
     out.mkdir(exist_ok=True)
     plt.rcParams["figure.dpi"] = 140
 
-    print("Loading MNIST...")
-    X, y = load_mnist()
+    hr("CONFIG")
+    print(f"  DIGITS           = {DIGITS}", flush=True)
+    print(f"  N_ITERATIONS     = {N_ITERATIONS}", flush=True)
+    print(f"  N_INDUCING       = {N_INDUCING}",   flush=True)
+    print(f"  N_SRC_FIT        = {N_SRC_FIT}",    flush=True)
+    print(f"  K_STEPS          = {K_STEPS}",      flush=True)
+    print(f"  N_TRANSPORT      = {N_TRANSPORT}",  flush=True)
+    print(f"  q -> q_final     = {Q} -> {Q_FINAL}", flush=True)
+    print(f"  N_MAX_PER_CLASS  = {N_MAX_PER_CLASS}", flush=True)
+    print(f"  EVOLUTION_DIGITS = {EVOLUTION_DIGITS}", flush=True)
+    print(f"  heartbeat        = every {HEARTBEAT_SEC}s during slow phases",
+          flush=True)
+
+    # ── 1. data ─────────────────────────────────────────────────────────
+    hr(f"PHASE 1 / 3: load MNIST")
+    with Heartbeat("load_mnist"):
+        X, y = load_mnist()
     d = X.shape[1]
 
+    # ── 2. fit per digit ────────────────────────────────────────────────
+    hr(f"PHASE 2 / 3: fit one model per digit ({len(DIGITS)} fits)")
     results = {}
-    for digit in DIGITS:
-        results[digit] = fit_one_digit(digit, X, y, d, rng)
+    for i, digit in enumerate(DIGITS, 1):
+        results[digit] = fit_one_digit(digit, X, y, d, rng, i, len(DIGITS))
 
-    print(f"\nWriting diagnostics to {OUTPUT_DIR}/...")
+    # ── 3. plots ────────────────────────────────────────────────────────
+    hr("PHASE 3 / 3: plots + summary")
+    print(f"  writing plots to '{out}/' ...", flush=True)
     plot_grid(out, results)
     plot_metrics(out, results)
     plot_evolution(out, results, EVOLUTION_DIGITS, d)
     write_summary(out, results)
-    print("Done.")
+    hr("DONE")
 
 
 if __name__ == "__main__":
