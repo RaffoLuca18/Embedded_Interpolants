@@ -1,5 +1,5 @@
 """
-flowers_script.py
+flowers_script_pca.py
 ========================
 Unconditional Embedded Interpolants on Oxford 102 Flowers, with optional
 PCA preprocessing (recommended).  Includes verbose progress (heartbeat
@@ -32,7 +32,7 @@ GRAYSCALE          = True
 N_MAX              = None
 TEST_FRACTION      = 0.10
 
-USE_PCA            = False
+USE_PCA            = True
 PCA_DIM            = 256
 
 N_ITERATIONS       = 8

@@ -1,12 +1,27 @@
 """
-mnist_script.py
+celeb_script_pca.py
 ================
-One Embedded Interpolants model on **all of MNIST** (unconditional).
+Self-contained: Embedded Interpolants on CelebA-aligned face images.
 
-Outputs (figs/mnist/):
-  target.png          target samples (held-out real digits)
-  iterations.png      train + fresh particles at selected iterations
-  diagnostic.png      SW1 vs Euler step, train and fresh
+Pipeline:
+  128x128 RGB -> flatten 49152 -> per-channel standardise -> PCA d_pca
+  -> EmbeddedInterpolants -> inverse PCA -> 128x128 RGB
+
+Expected input:
+  data/celeba/img_align_celeba/  (folder of .jpg images)
+
+  Either downloaded manually from:
+    https://mmlab.ie.cuhk.edu.hk/projects/CelebA.html
+  or via torchvision:
+    from torchvision.datasets import CelebA
+    CelebA(root='data', download=True)
+  or unzip 'img_align_celeba.zip' from the official Google Drive into
+  data/celeba/img_align_celeba/.
+
+Outputs (figs/celeba/):
+  target.png       grid of real held-out faces
+  iterations.png   2 x n_iters grid (Train / Fresh) at selected iterations
+  diagnostic.png   SW1 vs Euler step
   summary.txt
 """
 
@@ -17,7 +32,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib as mpl
 from matplotlib.gridspec import GridSpec
-from sklearn.datasets import fetch_openml
+from sklearn.decomposition import PCA
 
 sys.path.insert(0, "..")
 from src import EmbeddedInterpolants, sliced_wasserstein1
@@ -26,34 +41,39 @@ from src import EmbeddedInterpolants, sliced_wasserstein1
 # ════════════════════════════════════════════════════════════════════
 # CONFIG
 # ════════════════════════════════════════════════════════════════════
+NAME          = "CelebA"
+DATA_DIR      = Path("data/celeba/img_align_celeba")
+OUT           = Path("figs/celeba"); OUT.mkdir(parents=True, exist_ok=True)
+
 SEED          = 42
-OUT           = Path("figs/mnist"); OUT.mkdir(parents=True, exist_ok=True)
+IMG_SIZE      = 128                 # square crop + resize
+N_LOAD        = 5000                # how many CelebA faces to load
+TEST_FRACTION = 0.10
+N_TARGET_SHOW = 12
+N_TRAIN_SHOW  = 12
 
-N_MAX_TOTAL   = 10000
-N_TARGET_SHOW = 16
-N_TRAIN_SHOW  = 16
-N_FRESH_SHOW  = 16
+D_PCA         = 256                 # CelebA RGB needs more components than MNIST
 
-N_ITERATIONS  = 8
 SIGMA_K       = None
 Q             = 0.5
-Q_FINAL       = 0.05
-GAMMA         = 0.01
-GAMMA_FINAL   = 1e-8
-K_STEPS       = 100
-N_INDUCING    = 2000
+Q_FINAL       = 0.10
+GAMMA         = 1e-2
+GAMMA_FINAL   = 1e-7
+K_STEPS       = 80
+N_INDUCING    = 1500
 RESCALE       = True
 
-N_TRAIN       = 5000
-N_FRESH       = 1000
+N_ITER        = 10
+N_TRAIN       = 3000
+N_FRESH       = 600
 SW1_NPROJ     = 100
 HEARTBEAT_SEC = 5
 
-ITER_SHOW     = [0, 2, 4, 8]   # snapshots to display in iterations.png
+ITER_SHOW     = [0, 2, 5, 10]
 
 
 # ════════════════════════════════════════════════════════════════════
-# style (matches two-moons)
+# style — matches two-moons / MNIST / physical fields scripts
 # ════════════════════════════════════════════════════════════════════
 mpl.rcParams.update({
     'font.family':       'serif',
@@ -103,35 +123,47 @@ class Heartbeat:
 
 
 # ════════════════════════════════════════════════════════════════════
-# data
+# data loader
 # ════════════════════════════════════════════════════════════════════
-def load_mnist():
+def load_celeba():
+    if not DATA_DIR.exists():
+        print(f"\n[CelebA] data folder missing: {DATA_DIR}")
+        print("""    To get CelebA aligned images:
+      Option A — torchvision (downloads ~1.4 GB):
+        pip install torchvision
+        from torchvision.datasets import CelebA
+        CelebA(root='data', download=True)
+      Option B — manual:
+        download img_align_celeba.zip from
+          https://mmlab.ie.cuhk.edu.hk/projects/CelebA.html
+        and unzip into data/celeba/img_align_celeba/""")
+        sys.exit(1)
+
     try:
-        m = fetch_openml("mnist_784", version=1, as_frame=False, parser="auto")
-        X = m.data.astype(np.float32) / 255.0
-        y = m.target.astype(np.int64)
-        print(f"  MNIST via openml: X={X.shape}", flush=True)
-        return X, y
-    except Exception as e:
-        print(f"  openml failed ({type(e).__name__}); github mirror...", flush=True)
-    import gzip, struct, subprocess, tempfile
-    td = Path(tempfile.gettempdir()) / "mnist-data"
-    if not td.exists():
-        subprocess.run(["git", "clone", "--depth", "1",
-                        "https://github.com/fgnt/mnist.git", str(td)], check=True)
-    def _imgs(p):
-        with gzip.open(p, "rb") as f:
-            _, n, h, w = struct.unpack(">IIII", f.read(16))
-            return np.frombuffer(f.read(), np.uint8).reshape(n, h * w)
-    def _lbls(p):
-        with gzip.open(p, "rb") as f:
-            _, n = struct.unpack(">II", f.read(8))
-            return np.frombuffer(f.read(), np.uint8)
-    X = np.concatenate([_imgs(td / "train-images-idx3-ubyte.gz"),
-                        _imgs(td / "t10k-images-idx3-ubyte.gz")]).astype(np.float32) / 255.0
-    y = np.concatenate([_lbls(td / "train-labels-idx1-ubyte.gz"),
-                        _lbls(td / "t10k-labels-idx1-ubyte.gz")]).astype(np.int64)
-    return X, y
+        from PIL import Image
+    except ImportError:
+        print("Pillow is required: pip install pillow"); sys.exit(1)
+
+    paths = sorted(DATA_DIR.glob("*.jpg"))
+    if N_LOAD is not None:
+        paths = paths[:N_LOAD]
+    print(f"  loading {len(paths)} images, resizing to {IMG_SIZE}x{IMG_SIZE}")
+
+    imgs = np.empty((len(paths), IMG_SIZE, IMG_SIZE, 3), dtype=np.float32)
+    rng = np.random.default_rng(SEED)
+    log_every = max(1, len(paths) // 10)
+    for i, p in enumerate(paths):
+        im = Image.open(p).convert("RGB")
+        # CelebA-aligned is 178x218: centre-crop to 178x178 then resize
+        w, h = im.size
+        side = min(w, h)
+        l = (w - side) // 2; t = (h - side) // 2
+        im = im.crop((l, t, l + side, t + side)).resize(
+            (IMG_SIZE, IMG_SIZE), Image.BILINEAR)
+        imgs[i] = np.asarray(im, dtype=np.float32) / 255.0
+        if (i + 1) % log_every == 0:
+            print(f"    {i+1}/{len(paths)}", flush=True)
+    return imgs   # (N, H, W, 3) in [0, 1]
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -166,7 +198,7 @@ def fit_with_traces(model, X_src, X_tgt, n_iter):
             step_parts.append(res["trajectories"][k])
         iter_bnd.append(len(step_parts) - 1)
         x = res["particles"]
-    model._fitted     = True
+    model._fitted = True
     model._fit_result = {"particles": x, "snapshots": step_parts[::model.K_steps]}
     return step_parts, iter_bnd
 
@@ -185,27 +217,28 @@ def transport_with_traces(model, x_new):
 
 
 # ════════════════════════════════════════════════════════════════════
-# plots
+# plotting
 # ════════════════════════════════════════════════════════════════════
-def grid_strip(images, n, sz=28):
-    """Pack n images into a horizontal strip (sz x (sz+1)*n - 1)."""
+def grid_strip_rgb(images, n, sz=IMG_SIZE):
+    """Pack n RGB images (sz, sz, 3) horizontally with 1-px white gutters."""
     n = min(n, len(images))
-    out = np.ones((sz, (sz + 1) * n - 1), dtype=np.float32)
+    out = np.ones((sz, (sz + 1) * n - 1, 3), dtype=np.float32)
     for i in range(n):
-        out[:, i * (sz + 1): i * (sz + 1) + sz] = np.clip(
-            images[i].reshape(sz, sz), 0, 1)
+        out[:, i * (sz + 1): i * (sz + 1) + sz] = np.clip(images[i], 0, 1)
     return out
 
 
-def to_imgs(particles, scale, sz=28):
-    """De-standardise + clip to [0,1] for display."""
-    return np.clip(particles * scale.flatten(), 0, 1)
+def pca_to_imgs(particles_pca, sigma_z, pca, sd, mu, h, w):
+    """Inverse PCA + de-standardise + clip to [0,1]; reshape (N, H, W, 3)."""
+    z   = particles_pca * sigma_z
+    pix = pca.inverse_transform(z) * sd + mu
+    pix = np.clip(pix.reshape(-1, h, w, 3), 0, 1)
+    return pix
 
 
 def plot_target(target_imgs):
-    fig, ax = plt.subplots(figsize=(6.0, 1.4), facecolor='white')
-    ax.imshow(grid_strip(target_imgs, N_TARGET_SHOW), cmap='gray_r',
-              vmin=0, vmax=1, aspect='auto')
+    fig, ax = plt.subplots(figsize=(8.0, 1.6), facecolor='white')
+    ax.imshow(grid_strip_rgb(target_imgs, N_TARGET_SHOW), aspect='auto')
     style_panel(ax, C_TARGET_BG, C_TARGET_EDGE, lw=1.6)
     ax.set_title('Target', pad=8, color='#1a1a1a')
     plt.tight_layout()
@@ -215,9 +248,9 @@ def plot_target(target_imgs):
 
 def plot_iterations(train_snaps_imgs, fresh_snaps_imgs, iters):
     n_cols = len(iters)
-    fig = plt.figure(figsize=(2.4 * n_cols, 3.4), facecolor='white')
+    fig = plt.figure(figsize=(2.8 * n_cols, 4.0), facecolor='white')
     gs  = GridSpec(2, n_cols, hspace=0.18, wspace=0.10,
-                   left=0.06, right=0.99, top=0.86, bottom=0.04)
+                   left=0.05, right=0.99, top=0.88, bottom=0.04)
 
     for row_idx, snaps_imgs, bg, edge, label in [
         (0, train_snaps_imgs, C_TRAIN_BG, C_TRAIN_EDGE, 'Train'),
@@ -225,15 +258,14 @@ def plot_iterations(train_snaps_imgs, fresh_snaps_imgs, iters):
     ]:
         for col, it in enumerate(iters):
             ax = fig.add_subplot(gs[row_idx, col])
-            ax.imshow(grid_strip(snaps_imgs[col], N_TRAIN_SHOW), cmap='gray_r',
-                      vmin=0, vmax=1, aspect='auto')
+            ax.imshow(grid_strip_rgb(snaps_imgs[col], N_TRAIN_SHOW),
+                      aspect='auto')
             style_panel(ax, bg, edge)
             if row_idx == 0:
                 txt = r'$\ell\!=\!0$' if it == 0 else fr'$\ell\!=\!{it}$'
                 ax.set_title(txt, pad=6, color='#222222')
             if col == 0:
-                ax.set_ylabel(label, rotation=90, labelpad=10,
-                              color='#222222')
+                ax.set_ylabel(label, rotation=90, labelpad=10, color='#222222')
     fig.savefig(OUT / 'iterations.png', bbox_inches='tight', pad_inches=0.05)
     plt.close(fig)
 
@@ -262,13 +294,13 @@ def plot_diagnostic(sw_train, sw_fresh, iter_bnd):
     ax.set_xlim(0, xs[-1])
     ax.set_ylim(0, max(sw_train.max(), sw_fresh.max()) * 1.05)
     ax.set_xlabel('Euler step (across iterations)')
-    ax.set_ylabel(r'$\mathrm{SW}_1$')
+    ax.set_ylabel(r'$\mathrm{SW}_1$  (PCA feature space)')
     for s in ('top', 'right'): ax.spines[s].set_visible(False)
     ax.spines['left'].set_color('#666666')
     ax.spines['bottom'].set_color('#666666')
     ax.tick_params(colors='#444444')
     ax.legend(loc='upper right', frameon=False, fontsize=13)
-    ax.set_title('MNIST', pad=10)
+    ax.set_title(f'CelebA  (PCA $d={D_PCA}$)', pad=10)
     plt.tight_layout()
     fig.savefig(OUT / 'diagnostic.png', bbox_inches='tight', pad_inches=0.05)
     plt.close(fig)
@@ -282,73 +314,88 @@ def main():
     rng = np.random.default_rng(SEED)
 
     print("PHASE 1 -- load")
-    with Heartbeat("load_mnist"):
-        X, y = load_mnist()
+    with Heartbeat("load_celeba"):
+        X = load_celeba()
+    N, H, W, C = X.shape
+    print(f"  X: {X.shape}, range [{X.min():.3f}, {X.max():.3f}]")
 
-    if N_MAX_TOTAL is not None and len(X) > N_MAX_TOTAL:
-        keep = rng.choice(len(X), N_MAX_TOTAL, replace=False)
-        X = X[keep]
-    d = X.shape[1]
-    print(f"  using N={len(X)},  d={d}")
+    flat = X.reshape(N, -1).astype(np.float32)
+    mu = flat.mean(0, keepdims=True)
+    sd = flat.std(0, keepdims=True) + 1e-6
+    flat_n = (flat - mu) / sd
 
-    # standardise per-pixel
-    scale = np.maximum(np.std(X, axis=0, keepdims=True), 1e-3)
-    Xn    = X / scale
+    perm = rng.permutation(N)
+    n_tr = int((1 - TEST_FRACTION) * N)
+    X_target_fit  = flat_n[perm[:n_tr]]
+    X_target_held = flat_n[perm[n_tr:]]
+    target_show   = X[perm[n_tr:][:N_TARGET_SHOW]]
 
-    # held-out target / train split
-    perm = rng.permutation(len(Xn))
-    n_tr = int(0.9 * len(Xn))
-    X_train_target = Xn[perm[:n_tr]]   # passed to .fit() as target distribution
-    X_target_held  = Xn[perm[n_tr:]]   # held-out target for SW1
-    target_show    = X[perm[n_tr:][:N_TARGET_SHOW]]   # original-scale display
+    print(f"PHASE 2 -- PCA d={D_PCA}")
+    d_pca = min(D_PCA, n_tr - 1)
+    with Heartbeat("PCA fit"):
+        pca = PCA(n_components=d_pca, whiten=False).fit(X_target_fit)
+    ev = pca.explained_variance_ratio_.sum()
+    print(f"  explained variance = {ev:.3f}")
 
-    print("PHASE 2 -- fit")
+    Z_target_fit  = pca.transform(X_target_fit).astype(np.float32)
+    Z_target_held = pca.transform(X_target_held).astype(np.float32)
+    sigma_z       = Z_target_fit.std(0, keepdims=True) + 1e-8
+    Z_target_fit_s  = Z_target_fit  / sigma_z
+    Z_target_held_s = Z_target_held / sigma_z
+
+    print("PHASE 3 -- fit")
     model = EmbeddedInterpolants(
         sigma_k=SIGMA_K, gamma=GAMMA, gamma_final=GAMMA_FINAL,
         K_steps=K_STEPS, n_inducing=N_INDUCING,
         q=Q, q_final=Q_FINAL, rescale=RESCALE)
     with Heartbeat("fit_with_traces"):
         step_parts_train, iter_bnd = fit_with_traces(
-            model, np.random.randn(N_TRAIN, d), X_train_target,
-            n_iter=N_ITERATIONS)
+            model, np.random.randn(N_TRAIN, d_pca).astype(np.float32),
+            Z_target_fit_s, n_iter=N_ITER)
 
-    print("PHASE 3 -- transport (fresh)")
+    print("PHASE 4 -- transport (fresh)")
     with Heartbeat("transport_with_traces"):
         step_parts_fresh, _ = transport_with_traces(
-            model, np.random.randn(N_FRESH, d))
+            model, np.random.randn(N_FRESH, d_pca).astype(np.float32))
 
-    print("PHASE 4 -- SW1 along chain")
-    sw_train = np.array([sliced_wasserstein1(p, X_target_held, n_proj=SW1_NPROJ)
+    print("PHASE 5 -- SW1 in PCA feature space")
+    sw_train = np.array([sliced_wasserstein1(p, Z_target_held_s, n_proj=SW1_NPROJ)
                          for p in step_parts_train])
-    sw_fresh = np.array([sliced_wasserstein1(p, X_target_held, n_proj=SW1_NPROJ)
+    sw_fresh = np.array([sliced_wasserstein1(p, Z_target_held_s, n_proj=SW1_NPROJ)
                          for p in step_parts_fresh])
     print(f"  train SW1 final = {sw_train[-1]:.4f}")
     print(f"  fresh SW1 final = {sw_fresh[-1]:.4f}")
 
-    print("PHASE 5 -- plots")
-    # snapshots at requested iterations -> de-standardised images
-    train_imgs = [to_imgs(step_parts_train[iter_bnd[i]], scale) for i in ITER_SHOW]
-    fresh_imgs = [to_imgs(step_parts_fresh[iter_bnd[i]], scale) for i in ITER_SHOW]
+    print("PHASE 6 -- plots")
+    train_imgs = [pca_to_imgs(step_parts_train[iter_bnd[i]],
+                              sigma_z, pca, sd, mu, H, W)
+                  for i in ITER_SHOW]
+    fresh_imgs = [pca_to_imgs(step_parts_fresh[iter_bnd[i]],
+                              sigma_z, pca, sd, mu, H, W)
+                  for i in ITER_SHOW]
 
     plot_target(target_show)
     plot_iterations(train_imgs, fresh_imgs, ITER_SHOW)
     plot_diagnostic(sw_train, sw_fresh, iter_bnd)
 
     summary = (
-        f"MNIST unconditional\n"
-        f"N_total       = {len(X)}\n"
-        f"d             = {d}\n"
-        f"N_iterations  = {N_ITERATIONS}\n"
+        f"{NAME}\n"
+        f"N             = {N}\n"
+        f"image size    = {H}x{W}x{C}\n"
+        f"d_pixel       = {H*W*C}\n"
+        f"d_pca         = {d_pca}\n"
+        f"explained var = {ev:.4f}\n"
+        f"n_iter        = {N_ITER}\n"
         f"K_steps       = {K_STEPS}\n"
         f"n_inducing    = {N_INDUCING}\n"
         f"q -> q_final  = {Q} -> {Q_FINAL}\n"
         f"\n"
-        f"SW1 train (final) = {sw_train[-1]:.4f}\n"
-        f"SW1 fresh (final) = {sw_fresh[-1]:.4f}\n"
+        f"SW1 train (final, in PCA space) = {sw_train[-1]:.4f}\n"
+        f"SW1 fresh (final, in PCA space) = {sw_fresh[-1]:.4f}\n"
     )
-    (OUT / "summary.txt").write_text(summary)
+    (OUT / 'summary.txt').write_text(summary)
     print(summary)
-    print("DONE -- figs in", OUT)
+    print(f"DONE -- figs in {OUT}/")
 
 
 if __name__ == "__main__":

@@ -1,13 +1,14 @@
 """
-mnist_script.py
-================
-One Embedded Interpolants model on **all of MNIST** (unconditional).
+mnist_script_single_pca.py
+=======================
+One Embedded Interpolants model **per digit** on MNIST (10 separate fits),
+each running in a per-digit PCA feature space.
 
-Outputs (figs/mnist/):
-  target.png          target samples (held-out real digits)
-  iterations.png      train + fresh particles at selected iterations
-  diagnostic.png      SW1 vs Euler step, train and fresh
-  summary.txt
+For each digit produces:
+  figs/mnist_per_digit_pca/<d>/target.png
+  figs/mnist_per_digit_pca/<d>/iterations.png
+  figs/mnist_per_digit_pca/<d>/diagnostic.png
+And one global summary.txt.
 """
 
 import sys, time, threading
@@ -18,6 +19,7 @@ import matplotlib.pyplot as plt
 import matplotlib as mpl
 from matplotlib.gridspec import GridSpec
 from sklearn.datasets import fetch_openml
+from sklearn.decomposition import PCA
 
 sys.path.insert(0, "..")
 from src import EmbeddedInterpolants, sliced_wasserstein1
@@ -27,12 +29,17 @@ from src import EmbeddedInterpolants, sliced_wasserstein1
 # CONFIG
 # ════════════════════════════════════════════════════════════════════
 SEED          = 42
-OUT           = Path("figs/mnist"); OUT.mkdir(parents=True, exist_ok=True)
+OUT_ROOT      = Path("figs/mnist_per_digit_pca")
+OUT_ROOT.mkdir(parents=True, exist_ok=True)
 
-N_MAX_TOTAL   = 10000
-N_TARGET_SHOW = 16
-N_TRAIN_SHOW  = 16
-N_FRESH_SHOW  = 16
+DIGITS        = list(range(10))
+N_MAX_PER_CLASS = None
+TEST_FRACTION = 0.10
+
+N_TARGET_SHOW = 12
+N_TRAIN_SHOW  = 12
+
+D_PCA         = 48
 
 N_ITERATIONS  = 8
 SIGMA_K       = None
@@ -41,19 +48,19 @@ Q_FINAL       = 0.05
 GAMMA         = 0.01
 GAMMA_FINAL   = 1e-8
 K_STEPS       = 100
-N_INDUCING    = 2000
+N_INDUCING    = 800
 RESCALE       = True
 
-N_TRAIN       = 5000
-N_FRESH       = 1000
+N_TRAIN       = 2000
+N_FRESH       = 500
 SW1_NPROJ     = 100
 HEARTBEAT_SEC = 5
 
-ITER_SHOW     = [0, 2, 4, 8]   # snapshots to display in iterations.png
+ITER_SHOW     = [0, 2, 4, 8]
 
 
 # ════════════════════════════════════════════════════════════════════
-# style (matches two-moons)
+# style
 # ════════════════════════════════════════════════════════════════════
 mpl.rcParams.update({
     'font.family':       'serif',
@@ -135,7 +142,7 @@ def load_mnist():
 
 
 # ════════════════════════════════════════════════════════════════════
-# fit + transport with per-step traces
+# trace helpers
 # ════════════════════════════════════════════════════════════════════
 def fit_with_traces(model, X_src, X_tgt, n_iter):
     Y_init  = np.vstack([X_src, X_tgt])
@@ -185,10 +192,9 @@ def transport_with_traces(model, x_new):
 
 
 # ════════════════════════════════════════════════════════════════════
-# plots
+# plotting
 # ════════════════════════════════════════════════════════════════════
 def grid_strip(images, n, sz=28):
-    """Pack n images into a horizontal strip (sz x (sz+1)*n - 1)."""
     n = min(n, len(images))
     out = np.ones((sz, (sz + 1) * n - 1), dtype=np.float32)
     for i in range(n):
@@ -197,31 +203,32 @@ def grid_strip(images, n, sz=28):
     return out
 
 
-def to_imgs(particles, scale, sz=28):
-    """De-standardise + clip to [0,1] for display."""
-    return np.clip(particles * scale.flatten(), 0, 1)
+def pca_to_imgs(particles_pca, sigma_z, pca, scale):
+    z   = particles_pca * sigma_z
+    pix = pca.inverse_transform(z) * scale.flatten()
+    return np.clip(pix, 0, 1)
 
 
-def plot_target(target_imgs):
-    fig, ax = plt.subplots(figsize=(6.0, 1.4), facecolor='white')
+def plot_target(out, target_imgs, digit):
+    fig, ax = plt.subplots(figsize=(5.0, 1.4), facecolor='white')
     ax.imshow(grid_strip(target_imgs, N_TARGET_SHOW), cmap='gray_r',
               vmin=0, vmax=1, aspect='auto')
     style_panel(ax, C_TARGET_BG, C_TARGET_EDGE, lw=1.6)
-    ax.set_title('Target', pad=8, color='#1a1a1a')
+    ax.set_title(f'Target  (digit {digit})', pad=8, color='#1a1a1a')
     plt.tight_layout()
-    fig.savefig(OUT / 'target.png', bbox_inches='tight', pad_inches=0.05)
+    fig.savefig(out / 'target.png', bbox_inches='tight', pad_inches=0.05)
     plt.close(fig)
 
 
-def plot_iterations(train_snaps_imgs, fresh_snaps_imgs, iters):
+def plot_iterations(out, train_imgs, fresh_imgs, iters):
     n_cols = len(iters)
-    fig = plt.figure(figsize=(2.4 * n_cols, 3.4), facecolor='white')
+    fig = plt.figure(figsize=(2.2 * n_cols, 3.0), facecolor='white')
     gs  = GridSpec(2, n_cols, hspace=0.18, wspace=0.10,
                    left=0.06, right=0.99, top=0.86, bottom=0.04)
 
     for row_idx, snaps_imgs, bg, edge, label in [
-        (0, train_snaps_imgs, C_TRAIN_BG, C_TRAIN_EDGE, 'Train'),
-        (1, fresh_snaps_imgs, C_FRESH_BG, C_FRESH_EDGE, 'Fresh'),
+        (0, train_imgs, C_TRAIN_BG, C_TRAIN_EDGE, 'Train'),
+        (1, fresh_imgs, C_FRESH_BG, C_FRESH_EDGE, 'Fresh'),
     ]:
         for col, it in enumerate(iters):
             ax = fig.add_subplot(gs[row_idx, col])
@@ -232,15 +239,14 @@ def plot_iterations(train_snaps_imgs, fresh_snaps_imgs, iters):
                 txt = r'$\ell\!=\!0$' if it == 0 else fr'$\ell\!=\!{it}$'
                 ax.set_title(txt, pad=6, color='#222222')
             if col == 0:
-                ax.set_ylabel(label, rotation=90, labelpad=10,
-                              color='#222222')
-    fig.savefig(OUT / 'iterations.png', bbox_inches='tight', pad_inches=0.05)
+                ax.set_ylabel(label, rotation=90, labelpad=10, color='#222222')
+    fig.savefig(out / 'iterations.png', bbox_inches='tight', pad_inches=0.05)
     plt.close(fig)
 
 
-def plot_diagnostic(sw_train, sw_fresh, iter_bnd):
+def plot_diagnostic(out, sw_train, sw_fresh, iter_bnd, digit):
     xs = np.arange(len(sw_train))
-    fig, ax = plt.subplots(figsize=(10, 4.2), facecolor='white')
+    fig, ax = plt.subplots(figsize=(8, 3.6), facecolor='white')
 
     for i in range(len(iter_bnd) - 1):
         if i % 2 == 0:
@@ -249,10 +255,10 @@ def plot_diagnostic(sw_train, sw_fresh, iter_bnd):
 
     ax.fill_between(xs, sw_train, color=C_TRAIN_DOT, alpha=0.10, zorder=2)
     ax.plot(xs, sw_train, color=C_TRAIN_DOT, lw=2.0, zorder=4,
-            label=r'Train particles vs.\ held-out target')
+            label=r'Train particles')
     ax.fill_between(xs, sw_fresh, color=C_FRESH_DOT, alpha=0.10, zorder=2)
     ax.plot(xs, sw_fresh, color=C_FRESH_DOT, lw=2.0, zorder=4,
-            label=r'Fresh particles vs.\ held-out target')
+            label=r'Fresh particles')
 
     sec = ax.secondary_xaxis('top')
     sec.set_xticks(iter_bnd); sec.set_xticklabels([])
@@ -262,16 +268,89 @@ def plot_diagnostic(sw_train, sw_fresh, iter_bnd):
     ax.set_xlim(0, xs[-1])
     ax.set_ylim(0, max(sw_train.max(), sw_fresh.max()) * 1.05)
     ax.set_xlabel('Euler step (across iterations)')
-    ax.set_ylabel(r'$\mathrm{SW}_1$')
+    ax.set_ylabel(r'$\mathrm{SW}_1$  (PCA feature space)')
     for s in ('top', 'right'): ax.spines[s].set_visible(False)
     ax.spines['left'].set_color('#666666')
     ax.spines['bottom'].set_color('#666666')
     ax.tick_params(colors='#444444')
-    ax.legend(loc='upper right', frameon=False, fontsize=13)
-    ax.set_title('MNIST', pad=10)
+    ax.legend(loc='upper right', frameon=False, fontsize=12)
+    ax.set_title(f'MNIST digit {digit}  (PCA $d={D_PCA}$)', pad=10)
     plt.tight_layout()
-    fig.savefig(OUT / 'diagnostic.png', bbox_inches='tight', pad_inches=0.05)
+    fig.savefig(out / 'diagnostic.png', bbox_inches='tight', pad_inches=0.05)
     plt.close(fig)
+
+
+# ════════════════════════════════════════════════════════════════════
+# per-digit pipeline
+# ════════════════════════════════════════════════════════════════════
+def run_digit(digit, X, y, rng):
+    print(f"\n========= DIGIT {digit} =========")
+    out = OUT_ROOT / str(digit); out.mkdir(parents=True, exist_ok=True)
+
+    mask = y == digit
+    Xd   = X[mask]
+    if N_MAX_PER_CLASS is not None and len(Xd) > N_MAX_PER_CLASS:
+        Xd = Xd[rng.choice(len(Xd), N_MAX_PER_CLASS, replace=False)]
+    print(f"  n_samples = {len(Xd)}")
+
+    # per-pixel standardise
+    scale = np.maximum(np.std(Xd, axis=0, keepdims=True), 1e-3)
+    Xn    = Xd / scale
+
+    perm = rng.permutation(len(Xn))
+    n_tr = int((1 - TEST_FRACTION) * len(Xn))
+    X_target_fit  = Xn[perm[:n_tr]]
+    X_target_held = Xn[perm[n_tr:]]
+    target_show   = Xd[perm[n_tr:][:N_TARGET_SHOW]]
+
+    # PCA fit on the training-target split
+    d_pca = min(D_PCA, X_target_fit.shape[0] - 1)
+    with Heartbeat(f"PCA digit {digit}"):
+        pca = PCA(n_components=d_pca, whiten=False).fit(X_target_fit)
+    ev = pca.explained_variance_ratio_.sum()
+    print(f"  PCA d={d_pca}, explained var = {ev:.3f}")
+
+    Z_target_fit  = pca.transform(X_target_fit).astype(np.float32)
+    Z_target_held = pca.transform(X_target_held).astype(np.float32)
+    sigma_z = Z_target_fit.std(axis=0, keepdims=True) + 1e-8
+    Z_target_fit_s  = Z_target_fit  / sigma_z
+    Z_target_held_s = Z_target_held / sigma_z
+
+    model = EmbeddedInterpolants(
+        sigma_k=SIGMA_K, gamma=GAMMA, gamma_final=GAMMA_FINAL,
+        K_steps=K_STEPS, n_inducing=N_INDUCING,
+        q=Q, q_final=Q_FINAL, rescale=RESCALE)
+    with Heartbeat(f"fit digit {digit}"):
+        step_parts_train, iter_bnd = fit_with_traces(
+            model, np.random.randn(N_TRAIN, d_pca).astype(np.float32),
+            Z_target_fit_s, n_iter=N_ITERATIONS)
+
+    with Heartbeat(f"transport digit {digit}"):
+        step_parts_fresh, _ = transport_with_traces(
+            model, np.random.randn(N_FRESH, d_pca).astype(np.float32))
+
+    sw_train = np.array([sliced_wasserstein1(p, Z_target_held_s,
+                                             n_proj=SW1_NPROJ)
+                         for p in step_parts_train])
+    sw_fresh = np.array([sliced_wasserstein1(p, Z_target_held_s,
+                                             n_proj=SW1_NPROJ)
+                         for p in step_parts_fresh])
+
+    train_imgs = [pca_to_imgs(step_parts_train[iter_bnd[i]], sigma_z, pca, scale)
+                  for i in ITER_SHOW]
+    fresh_imgs = [pca_to_imgs(step_parts_fresh[iter_bnd[i]], sigma_z, pca, scale)
+                  for i in ITER_SHOW]
+
+    plot_target(out, target_show, digit)
+    plot_iterations(out, train_imgs, fresh_imgs, ITER_SHOW)
+    plot_diagnostic(out, sw_train, sw_fresh, iter_bnd, digit)
+
+    print(f"  SW1 train final = {sw_train[-1]:.4f}")
+    print(f"  SW1 fresh final = {sw_fresh[-1]:.4f}")
+    return dict(digit=digit, n_train=int(n_tr), d_pca=int(d_pca),
+                explained_var=float(ev),
+                sw1_train_final=float(sw_train[-1]),
+                sw1_fresh_final=float(sw_fresh[-1]))
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -281,74 +360,30 @@ def main():
     np.random.seed(SEED)
     rng = np.random.default_rng(SEED)
 
-    print("PHASE 1 -- load")
+    print("PHASE 1 -- load MNIST")
     with Heartbeat("load_mnist"):
         X, y = load_mnist()
 
-    if N_MAX_TOTAL is not None and len(X) > N_MAX_TOTAL:
-        keep = rng.choice(len(X), N_MAX_TOTAL, replace=False)
-        X = X[keep]
-    d = X.shape[1]
-    print(f"  using N={len(X)},  d={d}")
+    print(f"PHASE 2 -- per-digit fits with PCA d={D_PCA}")
+    results = [run_digit(digit, X, y, rng) for digit in DIGITS]
 
-    # standardise per-pixel
-    scale = np.maximum(np.std(X, axis=0, keepdims=True), 1e-3)
-    Xn    = X / scale
-
-    # held-out target / train split
-    perm = rng.permutation(len(Xn))
-    n_tr = int(0.9 * len(Xn))
-    X_train_target = Xn[perm[:n_tr]]   # passed to .fit() as target distribution
-    X_target_held  = Xn[perm[n_tr:]]   # held-out target for SW1
-    target_show    = X[perm[n_tr:][:N_TARGET_SHOW]]   # original-scale display
-
-    print("PHASE 2 -- fit")
-    model = EmbeddedInterpolants(
-        sigma_k=SIGMA_K, gamma=GAMMA, gamma_final=GAMMA_FINAL,
-        K_steps=K_STEPS, n_inducing=N_INDUCING,
-        q=Q, q_final=Q_FINAL, rescale=RESCALE)
-    with Heartbeat("fit_with_traces"):
-        step_parts_train, iter_bnd = fit_with_traces(
-            model, np.random.randn(N_TRAIN, d), X_train_target,
-            n_iter=N_ITERATIONS)
-
-    print("PHASE 3 -- transport (fresh)")
-    with Heartbeat("transport_with_traces"):
-        step_parts_fresh, _ = transport_with_traces(
-            model, np.random.randn(N_FRESH, d))
-
-    print("PHASE 4 -- SW1 along chain")
-    sw_train = np.array([sliced_wasserstein1(p, X_target_held, n_proj=SW1_NPROJ)
-                         for p in step_parts_train])
-    sw_fresh = np.array([sliced_wasserstein1(p, X_target_held, n_proj=SW1_NPROJ)
-                         for p in step_parts_fresh])
-    print(f"  train SW1 final = {sw_train[-1]:.4f}")
-    print(f"  fresh SW1 final = {sw_fresh[-1]:.4f}")
-
-    print("PHASE 5 -- plots")
-    # snapshots at requested iterations -> de-standardised images
-    train_imgs = [to_imgs(step_parts_train[iter_bnd[i]], scale) for i in ITER_SHOW]
-    fresh_imgs = [to_imgs(step_parts_fresh[iter_bnd[i]], scale) for i in ITER_SHOW]
-
-    plot_target(target_show)
-    plot_iterations(train_imgs, fresh_imgs, ITER_SHOW)
-    plot_diagnostic(sw_train, sw_fresh, iter_bnd)
-
-    summary = (
-        f"MNIST unconditional\n"
-        f"N_total       = {len(X)}\n"
-        f"d             = {d}\n"
-        f"N_iterations  = {N_ITERATIONS}\n"
-        f"K_steps       = {K_STEPS}\n"
-        f"n_inducing    = {N_INDUCING}\n"
-        f"q -> q_final  = {Q} -> {Q_FINAL}\n"
-        f"\n"
-        f"SW1 train (final) = {sw_train[-1]:.4f}\n"
-        f"SW1 fresh (final) = {sw_fresh[-1]:.4f}\n"
-    )
-    (OUT / "summary.txt").write_text(summary)
-    print(summary)
-    print("DONE -- figs in", OUT)
+    print("PHASE 3 -- summary")
+    lines = ["MNIST per-digit, PCA preprocessing", "=" * 40,
+             f"{'digit':>5}  {'n_train':>7}  {'d_pca':>5}  "
+             f"{'ev':>6}  {'sw1_train':>10}  {'sw1_fresh':>10}"]
+    for r in results:
+        lines.append(f"{r['digit']:>5}  {r['n_train']:>7}  "
+                     f"{r['d_pca']:>5}  {r['explained_var']:>6.3f}  "
+                     f"{r['sw1_train_final']:>10.4f}  "
+                     f"{r['sw1_fresh_final']:>10.4f}")
+    sw_t_mean = np.mean([r['sw1_train_final'] for r in results])
+    sw_f_mean = np.mean([r['sw1_fresh_final'] for r in results])
+    lines += ["", f"mean SW1 train = {sw_t_mean:.4f}",
+              f"mean SW1 fresh = {sw_f_mean:.4f}"]
+    txt = "\n".join(lines)
+    (OUT_ROOT / "summary.txt").write_text(txt)
+    print(txt)
+    print(f"\nDONE -- per-digit figs in {OUT_ROOT}/<digit>/")
 
 
 if __name__ == "__main__":

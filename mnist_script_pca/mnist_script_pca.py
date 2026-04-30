@@ -1,12 +1,14 @@
 """
-mnist_script.py
-================
-One Embedded Interpolants model on **all of MNIST** (unconditional).
+mnist_script_pca.py
+====================
+One Embedded Interpolants model on **all of MNIST** (unconditional), with
+PCA preprocessing.  The chain runs in PCA feature space; results are
+projected back to pixel space for display.
 
-Outputs (figs/mnist/):
+Outputs (figs/mnist_pca/):
   target.png          target samples (held-out real digits)
   iterations.png      train + fresh particles at selected iterations
-  diagnostic.png      SW1 vs Euler step, train and fresh
+  diagnostic.png      SW1 (in PCA feature space) vs Euler step
   summary.txt
 """
 
@@ -18,6 +20,7 @@ import matplotlib.pyplot as plt
 import matplotlib as mpl
 from matplotlib.gridspec import GridSpec
 from sklearn.datasets import fetch_openml
+from sklearn.decomposition import PCA
 
 sys.path.insert(0, "..")
 from src import EmbeddedInterpolants, sliced_wasserstein1
@@ -27,12 +30,13 @@ from src import EmbeddedInterpolants, sliced_wasserstein1
 # CONFIG
 # ════════════════════════════════════════════════════════════════════
 SEED          = 42
-OUT           = Path("figs/mnist"); OUT.mkdir(parents=True, exist_ok=True)
+OUT           = Path("figs/mnist_pca"); OUT.mkdir(parents=True, exist_ok=True)
 
 N_MAX_TOTAL   = 10000
 N_TARGET_SHOW = 16
 N_TRAIN_SHOW  = 16
-N_FRESH_SHOW  = 16
+
+D_PCA         = 64
 
 N_ITERATIONS  = 8
 SIGMA_K       = None
@@ -41,7 +45,7 @@ Q_FINAL       = 0.05
 GAMMA         = 0.01
 GAMMA_FINAL   = 1e-8
 K_STEPS       = 100
-N_INDUCING    = 2000
+N_INDUCING    = 1500
 RESCALE       = True
 
 N_TRAIN       = 5000
@@ -49,11 +53,11 @@ N_FRESH       = 1000
 SW1_NPROJ     = 100
 HEARTBEAT_SEC = 5
 
-ITER_SHOW     = [0, 2, 4, 8]   # snapshots to display in iterations.png
+ITER_SHOW     = [0, 2, 4, 8]
 
 
 # ════════════════════════════════════════════════════════════════════
-# style (matches two-moons)
+# style (matches two-moons / mnist_script.py)
 # ════════════════════════════════════════════════════════════════════
 mpl.rcParams.update({
     'font.family':       'serif',
@@ -185,10 +189,9 @@ def transport_with_traces(model, x_new):
 
 
 # ════════════════════════════════════════════════════════════════════
-# plots
+# plotting
 # ════════════════════════════════════════════════════════════════════
 def grid_strip(images, n, sz=28):
-    """Pack n images into a horizontal strip (sz x (sz+1)*n - 1)."""
     n = min(n, len(images))
     out = np.ones((sz, (sz + 1) * n - 1), dtype=np.float32)
     for i in range(n):
@@ -197,9 +200,11 @@ def grid_strip(images, n, sz=28):
     return out
 
 
-def to_imgs(particles, scale, sz=28):
-    """De-standardise + clip to [0,1] for display."""
-    return np.clip(particles * scale.flatten(), 0, 1)
+def pca_to_imgs(particles_pca, sigma_z, pca, scale):
+    """Inverse PCA + de-standardise + clip to [0,1] for display."""
+    z   = particles_pca * sigma_z
+    pix = pca.inverse_transform(z) * scale.flatten()
+    return np.clip(pix, 0, 1)
 
 
 def plot_target(target_imgs):
@@ -232,8 +237,7 @@ def plot_iterations(train_snaps_imgs, fresh_snaps_imgs, iters):
                 txt = r'$\ell\!=\!0$' if it == 0 else fr'$\ell\!=\!{it}$'
                 ax.set_title(txt, pad=6, color='#222222')
             if col == 0:
-                ax.set_ylabel(label, rotation=90, labelpad=10,
-                              color='#222222')
+                ax.set_ylabel(label, rotation=90, labelpad=10, color='#222222')
     fig.savefig(OUT / 'iterations.png', bbox_inches='tight', pad_inches=0.05)
     plt.close(fig)
 
@@ -262,13 +266,13 @@ def plot_diagnostic(sw_train, sw_fresh, iter_bnd):
     ax.set_xlim(0, xs[-1])
     ax.set_ylim(0, max(sw_train.max(), sw_fresh.max()) * 1.05)
     ax.set_xlabel('Euler step (across iterations)')
-    ax.set_ylabel(r'$\mathrm{SW}_1$')
+    ax.set_ylabel(r'$\mathrm{SW}_1$  (PCA feature space)')
     for s in ('top', 'right'): ax.spines[s].set_visible(False)
     ax.spines['left'].set_color('#666666')
     ax.spines['bottom'].set_color('#666666')
     ax.tick_params(colors='#444444')
     ax.legend(loc='upper right', frameon=False, fontsize=13)
-    ax.set_title('MNIST', pad=10)
+    ax.set_title(f'MNIST (PCA $d={D_PCA}$)', pad=10)
     plt.tight_layout()
     fig.savefig(OUT / 'diagnostic.png', bbox_inches='tight', pad_inches=0.05)
     plt.close(fig)
@@ -288,63 +292,86 @@ def main():
     if N_MAX_TOTAL is not None and len(X) > N_MAX_TOTAL:
         keep = rng.choice(len(X), N_MAX_TOTAL, replace=False)
         X = X[keep]
-    d = X.shape[1]
-    print(f"  using N={len(X)},  d={d}")
+    print(f"  using N={len(X)}")
 
-    # standardise per-pixel
+    # ── per-pixel standardisation ──────────────────────────────────
     scale = np.maximum(np.std(X, axis=0, keepdims=True), 1e-3)
     Xn    = X / scale
 
-    # held-out target / train split
+    # ── target / held-out split ────────────────────────────────────
     perm = rng.permutation(len(Xn))
     n_tr = int(0.9 * len(Xn))
-    X_train_target = Xn[perm[:n_tr]]   # passed to .fit() as target distribution
-    X_target_held  = Xn[perm[n_tr:]]   # held-out target for SW1
-    target_show    = X[perm[n_tr:][:N_TARGET_SHOW]]   # original-scale display
+    X_target_fit  = Xn[perm[:n_tr]]
+    X_target_held = Xn[perm[n_tr:]]
+    target_show   = X[perm[n_tr:][:N_TARGET_SHOW]]
 
-    print("PHASE 2 -- fit")
+    # ── PCA fit on the training-target split ───────────────────────
+    print(f"PHASE 2 -- PCA d={D_PCA}")
+    with Heartbeat("PCA fit"):
+        pca = PCA(n_components=D_PCA, whiten=False).fit(X_target_fit)
+    ev = pca.explained_variance_ratio_.sum()
+    print(f"  explained variance = {ev:.3f}")
+
+    Z_target_fit  = pca.transform(X_target_fit).astype(np.float32)
+    Z_target_held = pca.transform(X_target_held).astype(np.float32)
+
+    sigma_z = Z_target_fit.std(axis=0, keepdims=True) + 1e-8
+    Z_target_fit_s  = Z_target_fit  / sigma_z
+    Z_target_held_s = Z_target_held / sigma_z
+    d = D_PCA
+
+    # ── fit ────────────────────────────────────────────────────────
+    print("PHASE 3 -- fit")
     model = EmbeddedInterpolants(
         sigma_k=SIGMA_K, gamma=GAMMA, gamma_final=GAMMA_FINAL,
         K_steps=K_STEPS, n_inducing=N_INDUCING,
         q=Q, q_final=Q_FINAL, rescale=RESCALE)
     with Heartbeat("fit_with_traces"):
         step_parts_train, iter_bnd = fit_with_traces(
-            model, np.random.randn(N_TRAIN, d), X_train_target,
-            n_iter=N_ITERATIONS)
+            model, np.random.randn(N_TRAIN, d).astype(np.float32),
+            Z_target_fit_s, n_iter=N_ITERATIONS)
 
-    print("PHASE 3 -- transport (fresh)")
+    # ── transport (fresh) ──────────────────────────────────────────
+    print("PHASE 4 -- transport (fresh)")
     with Heartbeat("transport_with_traces"):
         step_parts_fresh, _ = transport_with_traces(
-            model, np.random.randn(N_FRESH, d))
+            model, np.random.randn(N_FRESH, d).astype(np.float32))
 
-    print("PHASE 4 -- SW1 along chain")
-    sw_train = np.array([sliced_wasserstein1(p, X_target_held, n_proj=SW1_NPROJ)
+    # ── SW1 in PCA feature space ───────────────────────────────────
+    print("PHASE 5 -- SW1 in PCA feature space")
+    sw_train = np.array([sliced_wasserstein1(p, Z_target_held_s,
+                                             n_proj=SW1_NPROJ)
                          for p in step_parts_train])
-    sw_fresh = np.array([sliced_wasserstein1(p, X_target_held, n_proj=SW1_NPROJ)
+    sw_fresh = np.array([sliced_wasserstein1(p, Z_target_held_s,
+                                             n_proj=SW1_NPROJ)
                          for p in step_parts_fresh])
     print(f"  train SW1 final = {sw_train[-1]:.4f}")
     print(f"  fresh SW1 final = {sw_fresh[-1]:.4f}")
 
-    print("PHASE 5 -- plots")
-    # snapshots at requested iterations -> de-standardised images
-    train_imgs = [to_imgs(step_parts_train[iter_bnd[i]], scale) for i in ITER_SHOW]
-    fresh_imgs = [to_imgs(step_parts_fresh[iter_bnd[i]], scale) for i in ITER_SHOW]
+    # ── snapshot images via inverse PCA ────────────────────────────
+    print("PHASE 6 -- plots")
+    train_imgs = [pca_to_imgs(step_parts_train[iter_bnd[i]], sigma_z, pca, scale)
+                  for i in ITER_SHOW]
+    fresh_imgs = [pca_to_imgs(step_parts_fresh[iter_bnd[i]], sigma_z, pca, scale)
+                  for i in ITER_SHOW]
 
     plot_target(target_show)
     plot_iterations(train_imgs, fresh_imgs, ITER_SHOW)
     plot_diagnostic(sw_train, sw_fresh, iter_bnd)
 
     summary = (
-        f"MNIST unconditional\n"
-        f"N_total       = {len(X)}\n"
-        f"d             = {d}\n"
-        f"N_iterations  = {N_ITERATIONS}\n"
-        f"K_steps       = {K_STEPS}\n"
-        f"n_inducing    = {N_INDUCING}\n"
-        f"q -> q_final  = {Q} -> {Q_FINAL}\n"
+        f"MNIST unconditional, PCA preprocessing\n"
+        f"N_total          = {len(X)}\n"
+        f"d_pixel          = {X.shape[1]}\n"
+        f"d_pca            = {D_PCA}\n"
+        f"PCA explained var= {ev:.4f}\n"
+        f"N_iterations     = {N_ITERATIONS}\n"
+        f"K_steps          = {K_STEPS}\n"
+        f"n_inducing       = {N_INDUCING}\n"
+        f"q -> q_final     = {Q} -> {Q_FINAL}\n"
         f"\n"
-        f"SW1 train (final) = {sw_train[-1]:.4f}\n"
-        f"SW1 fresh (final) = {sw_fresh[-1]:.4f}\n"
+        f"SW1 train (final, in PCA space) = {sw_train[-1]:.4f}\n"
+        f"SW1 fresh (final, in PCA space) = {sw_fresh[-1]:.4f}\n"
     )
     (OUT / "summary.txt").write_text(summary)
     print(summary)
