@@ -373,7 +373,7 @@ def main():
     X0_evo = np.random.randn(N_EVOLUTION_ROWS, d_feat)
     with Heartbeat("evolution"):
         snaps  = fine_grained_trajectory(model, X0_evo)
-    snaps_denorm = snaps * scale[None, None, :]
+    snaps_denorm = snaps * scale
 
     real_imgs  = X_tr_px[:N_REAL_SHOWN]
     train_imgs = to_pixels(model._fit_result["particles"])[:N_TRAIN_SHOWN]

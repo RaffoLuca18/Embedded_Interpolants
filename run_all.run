@@ -1,0 +1,24 @@
+#!/bin/bash
+
+BASE=/home/santoro/KEI4S
+
+declare -a JOBS=(
+    "mnist_script:mnist_script.py"
+    "dark_matr:dark_matr_script.py"
+    "turbolence_script:turbolence_script.py"
+    "mnist_script_pca:mnist_script_pca.py"
+    "celeb_script_pca:celeb_script_pca.py"
+    "flowers_script:flowers_script.py"
+    "flowers_script_pca:flowers_script_pca.py"
+)
+
+for entry in "${JOBS[@]}"; do
+    dir="${entry%%:*}"
+    script="${entry##*:}"
+    echo "Submitting: $dir/$script"
+    sbatch \
+        --job-name="$dir" \
+        --chdir="$BASE/$dir" \
+        --export=ALL,SCRIPT_FILE="$script" \
+        "$BASE/run_python.run"
+done

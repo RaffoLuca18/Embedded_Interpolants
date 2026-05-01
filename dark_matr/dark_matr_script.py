@@ -24,7 +24,7 @@ from matplotlib.gridspec import GridSpec
 from scipy.stats import gaussian_kde
 
 sys.path.insert(0, "..")
-from src import EmbeddedInterpolants
+from src import EmbeddedInterpolants, sliced_wasserstein1, energy_distance
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -55,6 +55,8 @@ N_FRESH       = 400
 KDE_PIXELS    = 80_000
 KDE_BW        = 0.08
 
+SW1_NPROJ     = 100
+ENERGY_NMAX   = 1000
 HEARTBEAT_SEC = 5
 
 
@@ -157,7 +159,8 @@ def run():
 
     perm = rng.permutation(N)
     n_tr = int((1 - TEST_FRACTION) * N)
-    X_target_fit = flat_n[perm[:n_tr]]
+    X_target_fit  = flat_n[perm[:n_tr]]
+    X_target_held = flat_n[perm[n_tr:]]
 
     print(f"  d_pixel = {d}")
 
@@ -186,8 +189,19 @@ def run():
 
     vmin, vmax = np.percentile(fields, [1, 99])
 
+    # ── metrics ────────────────────────────────────────────────────
+    print("PHASE 4 -- metrics")
+    snapshots = res['snapshots']
+    sw1_vals = [sliced_wasserstein1(s, X_target_held, n_proj=SW1_NPROJ)
+                for s in snapshots]
+    en_vals  = [energy_distance(s, X_target_held, n_max=ENERGY_NMAX, seed=0)
+                for s in snapshots]
+    for i, (s, e) in enumerate(zip(sw1_vals, en_vals)):
+        tag = "noise" if i == 0 else f"iter {i}"
+        print(f"  {tag:>7}: SW1={s:.4f}  E={e:.4f}")
+
     # ── plots ──────────────────────────────────────────────────────
-    print("PHASE 4 -- plots")
+    print("PHASE 5 -- plots")
     plot_single(OUT / 'target.png',    real_field, 'Target',
                 C_TARGET_BG, C_TARGET_EDGE, vmin, vmax)
     plot_single(OUT / 'generated.png', gen_field,  'Generated',
@@ -206,6 +220,9 @@ def run():
         f"K_steps       = {K_STEPS}\n"
         f"n_inducing    = {N_INDUCING}\n"
         f"q -> q_final  = {Q} -> {Q_FINAL}\n"
+        f"\n"
+        f"SW1  per iter  = {[round(v, 4) for v in sw1_vals]}\n"
+        f"energy per iter= {[round(v, 4) for v in en_vals]}\n"
     )
     (OUT / 'summary.txt').write_text(summary)
     print(summary)

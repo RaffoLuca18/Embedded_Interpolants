@@ -20,7 +20,7 @@ from matplotlib.gridspec import GridSpec
 from sklearn.datasets import fetch_openml
 
 sys.path.insert(0, "..")
-from src import EmbeddedInterpolants, sliced_wasserstein1
+from src import EmbeddedInterpolants, sliced_wasserstein1, energy_distance
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -47,6 +47,7 @@ RESCALE       = True
 N_TRAIN       = 5000
 N_FRESH       = 1000
 SW1_NPROJ     = 100
+ENERGY_NMAX   = 1000
 HEARTBEAT_SEC = 5
 
 ITER_SHOW     = [0, 2, 4, 8]   # snapshots to display in iterations.png
@@ -317,13 +318,21 @@ def main():
         step_parts_fresh, _ = transport_with_traces(
             model, np.random.randn(N_FRESH, d))
 
-    print("PHASE 4 -- SW1 along chain")
+    print("PHASE 4 -- SW1 + energy distance along chain")
     sw_train = np.array([sliced_wasserstein1(p, X_target_held, n_proj=SW1_NPROJ)
                          for p in step_parts_train])
     sw_fresh = np.array([sliced_wasserstein1(p, X_target_held, n_proj=SW1_NPROJ)
                          for p in step_parts_fresh])
-    print(f"  train SW1 final = {sw_train[-1]:.4f}")
-    print(f"  fresh SW1 final = {sw_fresh[-1]:.4f}")
+    en_train = np.array([energy_distance(step_parts_train[i], X_target_held,
+                                         n_max=ENERGY_NMAX, seed=0)
+                         for i in iter_bnd])
+    en_fresh = np.array([energy_distance(step_parts_fresh[i], X_target_held,
+                                         n_max=ENERGY_NMAX, seed=0)
+                         for i in iter_bnd])
+    print(f"  train SW1 final    = {sw_train[-1]:.4f}")
+    print(f"  fresh SW1 final    = {sw_fresh[-1]:.4f}")
+    print(f"  train energy final = {en_train[-1]:.4f}")
+    print(f"  fresh energy final = {en_fresh[-1]:.4f}")
 
     print("PHASE 5 -- plots")
     # snapshots at requested iterations -> de-standardised images
@@ -343,8 +352,10 @@ def main():
         f"n_inducing    = {N_INDUCING}\n"
         f"q -> q_final  = {Q} -> {Q_FINAL}\n"
         f"\n"
-        f"SW1 train (final) = {sw_train[-1]:.4f}\n"
-        f"SW1 fresh (final) = {sw_fresh[-1]:.4f}\n"
+        f"SW1 train (final)    = {sw_train[-1]:.4f}\n"
+        f"SW1 fresh (final)    = {sw_fresh[-1]:.4f}\n"
+        f"energy train (final) = {en_train[-1]:.4f}\n"
+        f"energy fresh (final) = {en_fresh[-1]:.4f}\n"
     )
     (OUT / "summary.txt").write_text(summary)
     print(summary)

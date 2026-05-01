@@ -25,7 +25,7 @@ from scipy.stats import gaussian_kde
 from sklearn.decomposition import PCA
 
 sys.path.insert(0, "..")
-from src import EmbeddedInterpolants
+from src import EmbeddedInterpolants, sliced_wasserstein1, energy_distance
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -57,6 +57,8 @@ N_FRESH       = 400
 KDE_PIXELS    = 80_000
 KDE_BW        = 0.08
 
+SW1_NPROJ     = 100
+ENERGY_NMAX   = 1000
 HEARTBEAT_SEC = 5
 
 
@@ -167,7 +169,9 @@ def run():
 
     Z_target_fit  = pca.transform(X_target_fit).astype(np.float32)
     sigma_z       = Z_target_fit.std(0, keepdims=True) + 1e-8
-    Z_target_fit_s = Z_target_fit / sigma_z
+    Z_target_fit_s  = Z_target_fit / sigma_z
+    Z_target_held   = pca.transform(flat_n[perm[n_tr:]]).astype(np.float32)
+    Z_target_held_s = Z_target_held / sigma_z
 
     print("PHASE 3 -- fit")
     model = EmbeddedInterpolants(
@@ -195,8 +199,19 @@ def run():
 
     vmin, vmax = np.percentile(fields, [1, 99])
 
+    # ── metrics ────────────────────────────────────────────────────
+    print("PHASE 5 -- metrics")
+    snapshots = res['snapshots']
+    sw1_vals = [sliced_wasserstein1(s, Z_target_held_s, n_proj=SW1_NPROJ)
+                for s in snapshots]
+    en_vals  = [energy_distance(s, Z_target_held_s, n_max=ENERGY_NMAX, seed=0)
+                for s in snapshots]
+    for i, (s, e) in enumerate(zip(sw1_vals, en_vals)):
+        tag = "noise" if i == 0 else f"iter {i}"
+        print(f"  {tag:>7}: SW1={s:.4f}  E={e:.4f}")
+
     # ── plots ──────────────────────────────────────────────────────
-    print("PHASE 5 -- plots")
+    print("PHASE 6 -- plots")
     plot_single(OUT / 'target.png',    real_field, 'Target',
                 C_TARGET_BG, C_TARGET_EDGE, vmin, vmax)
     plot_single(OUT / 'generated.png', gen_field,  'Generated',
@@ -216,6 +231,9 @@ def run():
         f"K_steps       = {K_STEPS}\n"
         f"n_inducing    = {N_INDUCING}\n"
         f"q -> q_final  = {Q} -> {Q_FINAL}\n"
+        f"\n"
+        f"SW1  per iter  = {[round(v, 4) for v in sw1_vals]}\n"
+        f"energy per iter= {[round(v, 4) for v in en_vals]}\n"
     )
     (OUT / 'summary.txt').write_text(summary)
     print(summary)
@@ -273,4 +291,20 @@ def plot_combined(path, name, real_field, gen_field,
 
     ax = fig.add_subplot(gs[2])
     ax.semilogy(grid, kde_r, color=C_TRAIN_DOT, lw=2.0, label='True', zorder=3)
-    ax.semilogy(grid, kde_g, color=C_FRESH_DOT, lw=2.0, label='Gen',  zorder=3
+    ax.semilogy(grid, kde_g, color=C_FRESH_DOT, lw=2.0, label='Gen',  zorder=3)
+    ax.set_xlim(-5, 5); ax.set_ylim(1e-3, 1.0)
+    ax.set_xlabel('Value'); ax.set_ylabel('Density')
+    for s in ('top', 'right'): ax.spines[s].set_visible(False)
+    ax.spines['left'].set_color('#666666')
+    ax.spines['bottom'].set_color('#666666')
+    ax.tick_params(colors='#444444')
+    ax.grid(True, which='both', alpha=0.20, lw=0.4)
+    ax.legend(loc='upper right', frameon=False, fontsize=12)
+
+    fig.savefig(path, bbox_inches='tight', pad_inches=0.05)
+    plt.close(fig)
+    print(f"  saved {path}")
+
+
+if __name__ == "__main__":
+    run()

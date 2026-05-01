@@ -35,7 +35,7 @@ from matplotlib.gridspec import GridSpec
 from sklearn.decomposition import PCA
 
 sys.path.insert(0, "..")
-from src import EmbeddedInterpolants, sliced_wasserstein1
+from src import EmbeddedInterpolants, sliced_wasserstein1, energy_distance
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -67,6 +67,7 @@ N_ITER        = 10
 N_TRAIN       = 3000
 N_FRESH       = 600
 SW1_NPROJ     = 100
+ENERGY_NMAX   = 1000
 HEARTBEAT_SEC = 5
 
 ITER_SHOW     = [0, 2, 5, 10]
@@ -358,13 +359,21 @@ def main():
         step_parts_fresh, _ = transport_with_traces(
             model, np.random.randn(N_FRESH, d_pca).astype(np.float32))
 
-    print("PHASE 5 -- SW1 in PCA feature space")
+    print("PHASE 5 -- SW1 + energy distance in PCA feature space")
     sw_train = np.array([sliced_wasserstein1(p, Z_target_held_s, n_proj=SW1_NPROJ)
                          for p in step_parts_train])
     sw_fresh = np.array([sliced_wasserstein1(p, Z_target_held_s, n_proj=SW1_NPROJ)
                          for p in step_parts_fresh])
-    print(f"  train SW1 final = {sw_train[-1]:.4f}")
-    print(f"  fresh SW1 final = {sw_fresh[-1]:.4f}")
+    en_train = np.array([energy_distance(step_parts_train[i], Z_target_held_s,
+                                         n_max=ENERGY_NMAX, seed=0)
+                         for i in iter_bnd])
+    en_fresh = np.array([energy_distance(step_parts_fresh[i], Z_target_held_s,
+                                         n_max=ENERGY_NMAX, seed=0)
+                         for i in iter_bnd])
+    print(f"  train SW1 final    = {sw_train[-1]:.4f}")
+    print(f"  fresh SW1 final    = {sw_fresh[-1]:.4f}")
+    print(f"  train energy final = {en_train[-1]:.4f}")
+    print(f"  fresh energy final = {en_fresh[-1]:.4f}")
 
     print("PHASE 6 -- plots")
     train_imgs = [pca_to_imgs(step_parts_train[iter_bnd[i]],
@@ -390,8 +399,10 @@ def main():
         f"n_inducing    = {N_INDUCING}\n"
         f"q -> q_final  = {Q} -> {Q_FINAL}\n"
         f"\n"
-        f"SW1 train (final, in PCA space) = {sw_train[-1]:.4f}\n"
-        f"SW1 fresh (final, in PCA space) = {sw_fresh[-1]:.4f}\n"
+        f"SW1 train (final, in PCA space)    = {sw_train[-1]:.4f}\n"
+        f"SW1 fresh (final, in PCA space)    = {sw_fresh[-1]:.4f}\n"
+        f"energy train (final, in PCA space) = {en_train[-1]:.4f}\n"
+        f"energy fresh (final, in PCA space) = {en_fresh[-1]:.4f}\n"
     )
     (OUT / 'summary.txt').write_text(summary)
     print(summary)
